@@ -71,6 +71,7 @@ if [ "$OS" = "Darwin" ]; then
   </array>
   <key>StartInterval</key><integer>$INTERVAL</integer>
   <key>RunAtLoad</key><true/>
+  <key>AbandonProcessGroup</key><true/>
   <key>StandardOutPath</key><string>$ROOT/logs/launchd.log</string>
   <key>StandardErrorPath</key><string>$ROOT/logs/launchd.log</string>
 </dict>
@@ -89,6 +90,8 @@ Description=merge-medic MR conflict watcher tick
 [Service]
 Type=oneshot
 ExecStart=/bin/bash $ROOT/watch.sh
+# fixers are launched detached by watch.sh and must outlive the tick
+KillMode=process
 UNIT
   cat > "$UNITDIR/merge-medic.timer" <<UNIT
 [Unit]
