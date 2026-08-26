@@ -8,3 +8,4 @@ worktrees/
 
 # macOS
 .DS_Store
+bin/mrtop
