@@ -15,6 +15,8 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/us
 
 # shellcheck source=/dev/null
 source "$ROOT/config.env"
+# shellcheck source=lib.sh
+source "$ROOT/lib.sh"
 
 LOGDIR="$ROOT/logs"; mkdir -p "$LOGDIR"
 LOG="$LOGDIR/watch.log"
@@ -26,15 +28,10 @@ STATE="$ROOT/state"; mkdir -p "$STATE"
 MARK="tried"; [ "${DRY_RUN:-1}" = "1" ] && MARK="dry"
 log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG"; }
 
-# macOS notification (NOTIFY=1 in config.env). osascript errors never kill us.
-notify() {
-  [ "${NOTIFY:-0}" = "1" ] || return 0
-  local title="$1" body="$2"
-  osascript -e "display notification \"${body//\"/\\\"}\" with title \"merge-medic\" subtitle \"${title//\"/\\\"}\" sound name \"${NOTIFY_SOUND:-Submarine}\"" >/dev/null 2>&1 || true
-}
+notify() { mm_notify "$@"; }
 
 # ── log rotation ──────────────────────────────────────────────────────────────
-if [ -f "$LOG" ] && [ "$(stat -f%z "$LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+if [ -f "$LOG" ] && [ "$(mm_filesize "$LOG")" -gt 5242880 ]; then
   mv -f "$LOG" "$LOG.1"
 fi
 

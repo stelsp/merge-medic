@@ -61,12 +61,14 @@ merge-medic — live   17:46:24
 | Scoped AI | resolver runs headless with a minimal tool allowlist; it cannot push |
 | DRY_RUN | default mode: detect and log only |
 
-macOS notifications fire on: new conflict, fixer started, fixed ✓ / failed.
+Desktop notifications (macOS `osascript` / Linux `notify-send`) fire on:
+new conflict, fixer started, fixed ✓ / failed.
 
 ## Install
 
-Requirements: macOS, [`glab`](https://gitlab.com/gitlab-org/cli) (authenticated),
-`jq`, `git`, [Claude Code CLI](https://code.claude.com).
+Requirements: macOS (launchd) or Linux (systemd user timer),
+[`glab`](https://gitlab.com/gitlab-org/cli) (authenticated), `jq`, `git`,
+[Claude Code CLI](https://code.claude.com).
 
 ```bash
 git clone https://github.com/stelsp/merge-medic && cd merge-medic
@@ -91,7 +93,7 @@ mrwatch pause/resume
 ## Architecture
 
 ```
-launchd (every N s)
+launchd / systemd user timer (every N s)
   └─ watch.sh            bash + glab api — free polling, edge detection,
      │                   SHA dedup, budget guard, notifications
      └─ fix-mr.sh ×N     one per conflicted MR (PARALLEL_FIXERS cap)
@@ -106,7 +108,6 @@ state/progress-<iid>.log  ←  phase events  ←  mrwatch top
 
 ## Roadmap
 
-- Linux support (systemd timer / cron instead of launchd, notify-send)
 - GitHub flavor (`gh` + PR mergeable state)
 - Server-side mode: same loop as a GitLab scheduled pipeline (survives laptop sleep)
 - Auto-retire polling if GitLab ever ships the `merge_request_conflict` webhook

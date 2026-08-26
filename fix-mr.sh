@@ -12,6 +12,8 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/us
 
 # shellcheck source=/dev/null
 source "$ROOT/config.env"
+# shellcheck source=lib.sh
+source "$ROOT/lib.sh"
 
 IID="$1"; SRC="$2"; TGT="$3"
 PROG="$ROOT/state/progress-$IID.log"
@@ -19,10 +21,7 @@ LOGDIR="$ROOT/logs"; mkdir -p "$LOGDIR" "$ROOT/worktrees" "$ROOT/state"
 WT="$ROOT/worktrees/wt-$IID"
 
 ev() { printf '%s|%s|%s\n' "$(date +%s)" "$1" "${2:-}" >> "$PROG"; }
-notify() {
-  [ "${NOTIFY:-0}" = "1" ] || return 0
-  osascript -e "display notification \"${2//\"/\\\"}\" with title \"merge-medic\" subtitle \"${1//\"/\\\"}\" sound name \"${NOTIFY_SOUND:-Submarine}\"" >/dev/null 2>&1 || true
-}
+notify() { mm_notify "$@"; }
 cleanup_wt() { git -C "$WATCH_REPO" worktree remove --force "$WT" 2>/dev/null || true; }
 fail() {
   ev FAIL "$1"

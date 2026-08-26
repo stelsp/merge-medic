@@ -15,8 +15,17 @@ while [ -L "$SELF" ]; do SELF="$(readlink "$SELF")"; done
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
 LABEL="com.merge-medic.watch"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+OS="$(uname -s)"
 # shellcheck source=/dev/null
 source "$ROOT/config.env" 2>/dev/null || true
+
+daemon_loaded() {
+  if [ "$OS" = "Darwin" ]; then
+    launchctl list 2>/dev/null | grep -q "$LABEL"
+  else
+    systemctl --user is-active --quiet merge-medic.timer 2>/dev/null
+  fi
+}
 
 B=$(tput bold 2>/dev/null || true); N=$(tput sgr0 2>/dev/null || true)
 RED=$(tput setaf 1 2>/dev/null || true); GRN=$(tput setaf 2 2>/dev/null || true)
@@ -45,8 +54,8 @@ case "$cmd" in
   status)
     echo "${B}merge-medic${N}"
 
-    if launchctl list 2>/dev/null | grep -q "$LABEL"; then
-      echo "  daemon  : ${GRN}loaded${N} (launchd)"
+    if daemon_loaded; then
+      echo "  daemon  : ${GRN}loaded${N}"
     else
       echo "  daemon  : ${RED}NOT loaded${N} — mrwatch resume"
     fi
@@ -101,7 +110,7 @@ case "$cmd" in
       today="$(date '+%Y-%m-%d')"
       spent="$(cat "$ROOT/state/budget-$today" 2>/dev/null || echo 0)"
       nfix="$(pgrep -f "$ROOT/fix-mr.sh" 2>/dev/null | wc -l | tr -d ' ')" || nfix=0
-      launchctl list 2>/dev/null | grep -q "$LABEL" && d="${GRN}on${N}" || d="${RED}off${N}"
+      daemon_loaded && d="${GRN}on${N}" || d="${RED}off${N}"
       out+="  daemon $d · AI budget $spent/${DAILY_AGENT_RUNS:-?} · active fixers: $nfix\n\n"
       shown=0
       for p in "$ROOT"/state/progress-*.log; do
@@ -170,11 +179,21 @@ case "$cmd" in
     ;;
 
   pause)
-    launchctl unload "$PLIST" && echo "watcher unloaded (mrwatch resume to bring back)"
+    if [ "$OS" = "Darwin" ]; then
+      launchctl unload "$PLIST"
+    else
+      systemctl --user stop merge-medic.timer
+    fi
+    echo "watcher paused (mrwatch resume to bring back)"
     ;;
 
   resume)
-    launchctl load "$PLIST" && echo "watcher loaded"
+    if [ "$OS" = "Darwin" ]; then
+      launchctl load "$PLIST"
+    else
+      systemctl --user start merge-medic.timer
+    fi
+    echo "watcher running"
     ;;
 
   *)
