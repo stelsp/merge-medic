@@ -1,11 +1,13 @@
 # merge-medic 🩹
 
-**Self-hosted GitLab MR conflict watcher that resolves conflicts with AI — but
-polls for free.**
+**Self-hosted GitLab/GitHub MR conflict watcher that resolves conflicts with
+AI — but polls for free.**
 
-A launchd daemon polls your open merge requests every few minutes with plain
-bash + [`glab`](https://gitlab.com/gitlab-org/cli) (zero tokens, zero cost).
-When an MR flips into `conflict`, a phase-driven fixer takes over:
+A launchd / systemd-timer daemon polls your open merge requests every few
+minutes with plain bash + your forge CLI
+([`glab`](https://gitlab.com/gitlab-org/cli) or [`gh`](https://cli.github.com))
+— zero tokens, zero cost. When an MR flips into `conflict`, a phase-driven
+fixer takes over:
 
 ```
 WORKTREE → MERGE → AI_RESOLVE | MERGE_CLEAN → VERIFY → PUSH
@@ -66,13 +68,14 @@ new conflict, fixer started, fixed ✓ / failed.
 
 ## Install
 
-Requirements: macOS (launchd) or Linux (systemd user timer),
-[`glab`](https://gitlab.com/gitlab-org/cli) (authenticated), `jq`, `git`,
-[Claude Code CLI](https://code.claude.com).
+Requirements: macOS (launchd) or Linux (systemd user timer), `jq`, `git`,
+[Claude Code CLI](https://code.claude.com), and your forge CLI —
+[`glab`](https://gitlab.com/gitlab-org/cli) for GitLab (default) or
+[`gh`](https://cli.github.com) for GitHub (`PROVIDER="github"` in config.env).
 
 ```bash
 git clone https://github.com/stelsp/merge-medic && cd merge-medic
-./install.sh          # deps check, config.env, launchd job (DRY_RUN by default)
+./install.sh          # deps check, config.env, scheduler (DRY_RUN by default)
 vim config.env        # project, host, verify command
 mrwatch log -f        # watch a few dry ticks
 # happy? set DRY_RUN=0 in config.env — that's it
@@ -94,7 +97,7 @@ mrwatch pause/resume
 
 ```
 launchd / systemd user timer (every N s)
-  └─ watch.sh            bash + glab api — free polling, edge detection,
+  └─ watch.sh            bash + glab/gh — free polling, edge detection,
      │                   SHA dedup, budget guard, notifications
      └─ fix-mr.sh ×N     one per conflicted MR (PARALLEL_FIXERS cap)
         ├─ git worktree  isolated per MR
@@ -108,7 +111,6 @@ state/progress-<iid>.log  ←  phase events  ←  mrwatch top
 
 ## Roadmap
 
-- GitHub flavor (`gh` + PR mergeable state)
 - Server-side mode: same loop as a GitLab scheduled pipeline (survives laptop sleep)
 - Auto-retire polling if GitLab ever ships the `merge_request_conflict` webhook
 

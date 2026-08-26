@@ -159,17 +159,24 @@ case "$cmd" in
     ;;
 
   mrs)
-    export GITLAB_HOST
-    ENC="${PROJECT_PATH//\//%2F}"
-    glab api "projects/$ENC/merge_requests?state=opened&per_page=100" 2>/dev/null \
-      | jq -r '.[] | [.iid, .detailed_merge_status, .source_branch, .target_branch, .title] | @tsv' \
+    if [ "${PROVIDER:-gitlab}" = "github" ]; then
+      gh pr list --repo "$PROJECT_PATH" --state open --limit 100 \
+        --json number,mergeable,headRefName,baseRefName,title 2>/dev/null \
+        | jq -r '.[] | [.number, (.mergeable | ascii_downcase), .headRefName, .baseRefName, .title] | @tsv'
+    else
+      export GITLAB_HOST
+      ENC="${PROJECT_PATH//\//%2F}"
+      glab api "projects/$ENC/merge_requests?state=opened&per_page=100" 2>/dev/null \
+        | jq -r '.[] | [.iid, .detailed_merge_status, .source_branch, .target_branch, .title] | @tsv'
+    fi \
       | while IFS=$'\t' read -r iid st src tgt title; do
           case "$st" in
-            conflict)  c="$RED" ;;
-            mergeable) c="$GRN" ;;
-            *)         c="$YLW" ;;
+            conflict|conflicting) c="$RED" ;;
+            mergeable)            c="$GRN" ;;
+            *)                    c="$YLW" ;;
           esac
-          printf "  !%-4s ${c}%-22s${N} %s -> %s  ${DIM}%s${N}\n" "$iid" "$st" "$src" "$tgt" "${title:0:50}"
+          [ "${PROVIDER:-gitlab}" = "github" ] && s='#' || s='!'
+          printf "  %s%-4s ${c}%-22s${N} %s -> %s  ${DIM}%s${N}\n" "$s" "$iid" "$st" "$src" "$tgt" "${title:0:50}"
         done
     ;;
 

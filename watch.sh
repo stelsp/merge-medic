@@ -54,62 +54,97 @@ BUDGET_FILE="$STATE/budget-$today"
 find "$STATE" -name 'budget-*' -mtime +3 -delete 2>/dev/null || true
 spent="$(cat "$BUDGET_FILE")"
 
-# ── list open MRs ─────────────────────────────────────────────────────────────
-ENC_PATH="${PROJECT_PATH//\//%2F}"
-export GITLAB_HOST
-
-mrs="$(glab api "projects/$ENC_PATH/merge_requests?state=opened&per_page=100" 2>/dev/null || echo '')"
-if [ -z "$mrs" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$mrs"; then
-  log "ERROR: could not list MRs (check glab auth status / GITLAB_TOKEN)"; exit 1
-fi
-
-# ── pick conflicted MRs not yet tried ─────────────────────────────────────────
+# ── pick conflicted MRs/PRs not yet tried ─────────────────────────────────────
 targets=""   # iid<TAB>source<TAB>target<TAB>title
 verbose=0
-for iid in $(jq -r '.[].iid' <<<"$mrs"); do
-  mr="$(glab api "projects/$ENC_PATH/merge_requests/$iid" 2>/dev/null || echo '{}')"
-  status="$(jq -r '.detailed_merge_status // "unknown"' <<<"$mr")"
+SIGIL="$(mm_ref_sigil)"
 
-  # GitLab computes mergeability asynchronously — give it a moment
-  if [ "$status" = "checking" ] || [ "$status" = "unchecked" ]; then
-    sleep 5
-    mr="$(glab api "projects/$ENC_PATH/merge_requests/$iid" 2>/dev/null || echo '{}')"
-    status="$(jq -r '.detailed_merge_status // "unknown"' <<<"$mr")"
-  fi
-
-  src="$(jq -r '.source_branch' <<<"$mr")"
-  tgt="$(jq -r '.target_branch' <<<"$mr")"
-  title="$(jq -r '.title' <<<"$mr")"
-  draft="$(jq -r '.draft' <<<"$mr")"
-  ssha="$(jq -r '.sha // .diff_refs.head_sha // "?"' <<<"$mr")"
-  tsha="$(jq -r '.diff_refs.base_sha // "?"' <<<"$mr")"
-
-  seen_file="$STATE/mr-$iid"
+# Shared edge/dedup logic: called once per MR/PR with normalized fields.
+consider() {
+  local iid="$1" src="$2" tgt="$3" title="$4" draft="$5" status="$6" ssha="$7" tsha="$8"
+  local seen_file="$STATE/mr-$iid" prev_status
   prev_status="$(cut -d' ' -f1 "$seen_file" 2>/dev/null || echo 'none')"
   echo "$status $ssha:$tsha" > "$seen_file"
 
-  [ "$status" != "conflict" ] && continue
+  [ "$status" != "conflict" ] && return 0
 
   # edge: state change worth logging + notifying
   if [ "$prev_status" != "conflict" ]; then
-    log "  !$iid  went into CONFLICT  ($src -> $tgt)  $title"; verbose=1
-    notify "Conflict in MR !$iid" "$src -> $tgt: $title"
+    log "  $SIGIL$iid  went into CONFLICT  ($src -> $tgt)  $title"; verbose=1
+    notify "Conflict in $SIGIL$iid" "$src -> $tgt: $title"
   fi
 
-  if [ "$SKIP_DRAFTS" = "1" ] && [ "$draft" = "true" ]; then continue; fi
+  if [ "$SKIP_DRAFTS" = "1" ] && [ "$draft" = "true" ]; then return 0; fi
 
-  skip=0
-  for ex in $EXCLUDE_BRANCHES; do [ "$src" = "$ex" ] && skip=1; done
-  [ "$skip" = "1" ] && continue
+  local ex
+  for ex in $EXCLUDE_BRANCHES; do [ "$src" = "$ex" ] && return 0; done
 
   # this exact commit pair was already tried and failed — don't burn tokens again
   if [ -f "$STATE/$MARK-$iid" ] && [ "$(cat "$STATE/$MARK-$iid")" = "$ssha:$tsha" ]; then
-    continue
+    return 0
   fi
 
   targets+="$iid	$src	$tgt	$title
 "
-done
+}
+
+if [ "${PROVIDER:-gitlab}" = "github" ]; then
+  # ── GitHub via gh ───────────────────────────────────────────────────────────
+  command -v gh >/dev/null 2>&1 || { log "ERROR: PROVIDER=github but gh is not installed"; exit 1; }
+  prs="$(gh pr list --repo "$PROJECT_PATH" --state open --limit 100 \
+        --json number,title,headRefName,baseRefName,mergeable,isDraft,headRefOid 2>/dev/null || echo '')"
+  if [ -z "$prs" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$prs"; then
+    log "ERROR: could not list PRs (check gh auth status)"; exit 1
+  fi
+  while IFS= read -r row; do
+    iid="$(jq -r '.number' <<<"$row")"
+    mergeable="$(jq -r '.mergeable' <<<"$row")"
+    # GitHub computes mergeability asynchronously — give it a moment
+    if [ "$mergeable" = "UNKNOWN" ]; then
+      sleep 5
+      mergeable="$(gh pr view "$iid" --repo "$PROJECT_PATH" --json mergeable --jq .mergeable 2>/dev/null || echo UNKNOWN)"
+    fi
+    case "$mergeable" in
+      CONFLICTING) status="conflict" ;;
+      MERGEABLE)   status="mergeable" ;;
+      *)           status="unknown" ;;
+    esac
+    src="$(jq -r '.headRefName' <<<"$row")"
+    tgt="$(jq -r '.baseRefName' <<<"$row")"
+    title="$(jq -r '.title' <<<"$row")"
+    draft="$(jq -r '.isDraft' <<<"$row")"
+    ssha="$(jq -r '.headRefOid // "?"' <<<"$row")"
+    tsha="$(gh api "repos/$PROJECT_PATH/commits/$tgt" --jq .sha 2>/dev/null || echo '?')"
+    consider "$iid" "$src" "$tgt" "$title" "$draft" "$status" "$ssha" "$tsha"
+  done < <(jq -c '.[]' <<<"$prs")
+else
+  # ── GitLab via glab ─────────────────────────────────────────────────────────
+  ENC_PATH="${PROJECT_PATH//\//%2F}"
+  export GITLAB_HOST
+  mrs="$(glab api "projects/$ENC_PATH/merge_requests?state=opened&per_page=100" 2>/dev/null || echo '')"
+  if [ -z "$mrs" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$mrs"; then
+    log "ERROR: could not list MRs (check glab auth status / GITLAB_TOKEN)"; exit 1
+  fi
+  for iid in $(jq -r '.[].iid' <<<"$mrs"); do
+    mr="$(glab api "projects/$ENC_PATH/merge_requests/$iid" 2>/dev/null || echo '{}')"
+    status="$(jq -r '.detailed_merge_status // "unknown"' <<<"$mr")"
+
+    # GitLab computes mergeability asynchronously — give it a moment
+    if [ "$status" = "checking" ] || [ "$status" = "unchecked" ]; then
+      sleep 5
+      mr="$(glab api "projects/$ENC_PATH/merge_requests/$iid" 2>/dev/null || echo '{}')"
+      status="$(jq -r '.detailed_merge_status // "unknown"' <<<"$mr")"
+    fi
+
+    src="$(jq -r '.source_branch' <<<"$mr")"
+    tgt="$(jq -r '.target_branch' <<<"$mr")"
+    title="$(jq -r '.title' <<<"$mr")"
+    draft="$(jq -r '.draft' <<<"$mr")"
+    ssha="$(jq -r '.sha // .diff_refs.head_sha // "?"' <<<"$mr")"
+    tsha="$(jq -r '.diff_refs.base_sha // "?"' <<<"$mr")"
+    consider "$iid" "$src" "$tgt" "$title" "$draft" "$status" "$ssha" "$tsha"
+  done
+fi
 
 if [ -z "$targets" ]; then
   [ "$verbose" = "1" ] && log "no new conflicts to fix"
