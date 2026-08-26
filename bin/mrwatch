@@ -34,9 +34,10 @@ YLW=$(tput setaf 3 2>/dev/null || true); DIM=$(tput dim 2>/dev/null || true)
 latest_ai_log() { ls -t "$ROOT"/logs/ai-*.log 2>/dev/null | head -1; }
 
 # phase → [base pct, next pct, avg duration s] for the interpolated bar
-phase_base() { case "$1" in START) echo 3;; WORKTREE) echo 10;; MERGE) echo 25;; MERGE_CLEAN|AI_RESOLVE) echo 45;; VERIFY) echo 75;; PUSH) echo 92;; DONE|FAIL) echo 100;; *) echo 0;; esac; }
-phase_next() { case "$1" in START) echo 10;; WORKTREE) echo 25;; MERGE) echo 45;; MERGE_CLEAN|AI_RESOLVE) echo 75;; VERIFY) echo 92;; PUSH) echo 99;; *) echo 100;; esac; }
-phase_avg()  { case "$1" in START) echo 3;; WORKTREE) echo 5;; MERGE) echo 10;; MERGE_CLEAN) echo 2;; AI_RESOLVE) echo 90;; VERIFY) echo 150;; PUSH) echo 5;; *) echo 1;; esac; }
+phase_base() { case "$1" in START) echo 3;; WORKTREE) echo 10;; MERGE) echo 25;; MERGE_CLEAN|AI_RESOLVE) echo 45;; VERIFY) echo 70;; TESTS) echo 80;; REGRESSION) echo 88;; PUSH) echo 95;; DONE|FAIL|ESCALATED) echo 100;; *) echo 0;; esac; }
+phase_next() { case "$1" in START) echo 10;; WORKTREE) echo 25;; MERGE) echo 45;; MERGE_CLEAN|AI_RESOLVE) echo 70;; VERIFY) echo 80;; TESTS) echo 88;; REGRESSION) echo 95;; PUSH) echo 99;; *) echo 100;; esac; }
+phase_avg()  { case "$1" in START) echo 3;; WORKTREE) echo 5;; MERGE) echo 10;; MERGE_CLEAN) echo 2;; AI_RESOLVE) echo 90;; VERIFY) echo 150;; TESTS) echo 60;; REGRESSION) echo 180;; PUSH) echo 5;; *) echo 1;; esac; }
+is_terminal() { case "$1" in DONE|FAIL|ESCALATED) return 0;; *) return 1;; esac; }
 
 # interpolate percent within the current phase by elapsed time vs its average
 phase_pct() { # $1=phase $2=seconds spent in this phase
@@ -132,18 +133,18 @@ case "$cmd" in
       daemon_loaded && d="${GRN}on${N}" || d="${RED}off${N}"
 
       # today's counters from the phase logs
-      ok=0; bad=0; clean=0; ai=0
+      ok=0; bad=0; esc=0; clean=0; ai=0
       for p in "$ROOT"/state/progress-*.log; do
         [ -e "$p" ] || continue
         while IFS='|' read -r ets ephase _; do
           [ "${ets:-0}" -lt "$day0" ] && continue
           case "$ephase" in
-            DONE) ok=$((ok+1));; FAIL) bad=$((bad+1));;
+            DONE) ok=$((ok+1));; FAIL) bad=$((bad+1));; ESCALATED) esc=$((esc+1));;
             MERGE_CLEAN) clean=$((clean+1));; AI_RESOLVE) ai=$((ai+1));;
           esac
         done < "$p"
       done
-      out+="  daemon $d · AI budget $spent/${DAILY_AGENT_RUNS:-?} · active: $nfix · today: ${GRN}$ok fixed${N} / ${RED}$bad failed${N} · $clean clean, $ai AI\n\n"
+      out+="  daemon $d · AI budget $spent/${DAILY_AGENT_RUNS:-?} · active: $nfix · today: ${GRN}$ok fixed${N} / ${RED}$bad failed${N} / ${YLW}$esc→human${N} · $clean clean, $ai AI\n\n"
 
       shown=0; newest_log=""
       for p in "$ROOT"/state/progress-*.log; do
@@ -152,14 +153,14 @@ case "$cmd" in
         lastline="$(tail -1 "$p" 2>/dev/null)"; [ -z "$lastline" ] && continue
         ts="${lastline%%|*}"; rest="${lastline#*|}"; phase="${rest%%|*}"; detail="${rest#*|}"
         t0line="$(head -1 "$p")"; t0="${t0line%%|*}"
-        active=1; { [ "$phase" = "DONE" ] || [ "$phase" = "FAIL" ]; } && active=0
+        active=1; is_terminal "$phase" && active=0
         # hide DONE/FAIL older than 2 hours
         [ "$active" = "0" ] && [ $(( now - ts )) -gt 7200 ] && continue
         inphase=$(( now - ${ts:-0} )); [ "$active" = "0" ] && inphase=0
         pct="$(phase_pct "$phase" "$inphase")"
         el=$(( ${ts:-0} - ${t0:-0} )); [ "$active" = "1" ] && el=$(( now - t0 ))
         case "$phase" in
-          DONE) c="$GRN";; FAIL) c="$RED";; AI_RESOLVE) c="$YLW";; *) c="";;
+          DONE) c="$GRN";; FAIL) c="$RED";; AI_RESOLVE|ESCALATED) c="$YLW";; *) c="";;
         esac
         mark=' '; [ "$active" = "1" ] && { mark="$sp"; newest_log="$iid"; }
         printf -v line "  %s ${B}!%-4s${N} [%s] %3d%%  ${c}%-11s${N} %3dm%02ds  ${DIM}%s${N}" \
@@ -196,7 +197,7 @@ case "$cmd" in
         fi
       fi
 
-      out+="\n  ${DIM}q quit · l log panel · r run tick · p pause/resume · phases: START→WORKTREE→MERGE→AI|CLEAN→VERIFY→PUSH→DONE${N}\n"
+      out+="\n  ${DIM}q quit · l log panel · r run tick · p pause/resume · WORKTREE→MERGE→AI|CLEAN→VERIFY→TESTS→REGRESSION→PUSH→DONE|ESCALATED${N}\n"
       if [ "${2:-}" = "--once" ]; then printf "%b" "$out"; exit 0; fi
       printf '\033[H\033[2J'
       printf "%b" "$out"

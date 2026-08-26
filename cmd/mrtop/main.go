@@ -39,12 +39,19 @@ var phases = map[string]phaseInfo{
 	"START":       {3, 10, 3},
 	"WORKTREE":    {10, 25, 5},
 	"MERGE":       {25, 45, 10},
-	"MERGE_CLEAN": {45, 75, 2},
-	"AI_RESOLVE":  {45, 75, 90},
-	"VERIFY":      {75, 92, 150},
-	"PUSH":        {92, 99, 5},
+	"MERGE_CLEAN": {45, 70, 2},
+	"AI_RESOLVE":  {45, 70, 90},
+	"VERIFY":      {70, 80, 150},
+	"TESTS":       {80, 88, 60},
+	"REGRESSION":  {88, 95, 180},
+	"PUSH":        {95, 99, 5},
 	"DONE":        {100, 100, 1},
 	"FAIL":        {100, 100, 1},
+	"ESCALATED":   {100, 100, 1},
+}
+
+func terminal(phase string) bool {
+	return phase == "DONE" || phase == "FAIL" || phase == "ESCALATED"
 }
 
 type fixer struct {
@@ -56,11 +63,11 @@ type fixer struct {
 type mrState struct{ iid, status string }
 
 type snapshot struct {
-	fixers            []fixer
-	mrs               []mrState
-	budget, budgetMax string
-	daemon            bool
-	ok, bad, clean, ai int
+	fixers                  []fixer
+	mrs                     []mrState
+	budget, budgetMax       string
+	daemon                  bool
+	ok, bad, esc, clean, ai int
 }
 
 type tickMsg time.Time
@@ -150,9 +157,10 @@ func (m model) View() string {
 	if s.daemon {
 		d = green.Render("on")
 	}
-	b.WriteString(fmt.Sprintf("  daemon %s · AI budget %s/%s · today: %s / %s · %d clean, %d AI\n\n",
+	b.WriteString(fmt.Sprintf("  daemon %s · AI budget %s/%s · today: %s / %s / %s · %d clean, %d AI\n\n",
 		d, s.budget, s.budgetMax,
 		green.Render(fmt.Sprintf("%d fixed", s.ok)), red.Render(fmt.Sprintf("%d failed", s.bad)),
+		yellow.Render(fmt.Sprintf("%d→human", s.esc)),
 		s.clean, s.ai))
 
 	if len(s.fixers) == 0 {
@@ -179,7 +187,7 @@ func (m model) View() string {
 			style = green
 		case "FAIL":
 			style = red
-		case "AI_RESOLVE":
+		case "AI_RESOLVE", "ESCALATED":
 			style = yellow
 		}
 		row := fmt.Sprintf("  %s %s [%s] %3d%%  %s %3dm%02ds  %s",
@@ -285,6 +293,8 @@ func readSnapshot(root string) snapshot {
 					s.ok++
 				case "FAIL":
 					s.bad++
+				case "ESCALATED":
+					s.esc++
 				case "MERGE_CLEAN":
 					s.clean++
 				case "AI_RESOLVE":
@@ -300,7 +310,7 @@ func readSnapshot(root string) snapshot {
 		if len(last) > 2 {
 			f.detail = last[2]
 		}
-		f.active = f.phase != "DONE" && f.phase != "FAIL"
+		f.active = !terminal(f.phase)
 		if !f.active && now.Unix()-f.ts > 7200 {
 			continue // hide finished fixers older than 2h
 		}
