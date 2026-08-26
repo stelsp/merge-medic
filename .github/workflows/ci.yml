@@ -13,9 +13,9 @@ jobs:
       - name: shellcheck
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
-          shellcheck -S warning watch.sh fix-mr.sh bin/mrwatch install.sh uninstall.sh
+          shellcheck -S warning watch.sh fix-mr.sh lib.sh bin/mrwatch install.sh uninstall.sh
       - name: bash -n
         run: |
-          for f in watch.sh fix-mr.sh bin/mrwatch install.sh uninstall.sh; do
+          for f in watch.sh fix-mr.sh lib.sh bin/mrwatch install.sh uninstall.sh; do
             bash -n "$f"
           done
