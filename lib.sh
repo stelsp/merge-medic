@@ -17,3 +17,8 @@ mm_notify() {
 mm_filesize() {
   stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null || echo 0
 }
+
+# Reference sigil for MR/PR ids: GitLab !42, GitHub #42.
+mm_ref_sigil() {
+  if [ "${PROVIDER:-gitlab}" = "github" ]; then printf '#'; else printf '!'; fi
+}

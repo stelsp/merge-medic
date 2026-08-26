@@ -16,6 +16,7 @@ source "$ROOT/config.env"
 source "$ROOT/lib.sh"
 
 IID="$1"; SRC="$2"; TGT="$3"
+SIGIL="$(mm_ref_sigil)"
 PROG="$ROOT/state/progress-$IID.log"
 LOGDIR="$ROOT/logs"; mkdir -p "$LOGDIR" "$ROOT/worktrees" "$ROOT/state"
 WT="$ROOT/worktrees/wt-$IID"
@@ -25,7 +26,7 @@ notify() { mm_notify "$@"; }
 cleanup_wt() { git -C "$WATCH_REPO" worktree remove --force "$WT" 2>/dev/null || true; }
 fail() {
   ev FAIL "$1"
-  notify "MR !$IID: fix failed" "$1"
+  notify "${SIGIL}$IID: fix failed" "$1"
   cleanup_wt
   exit 1
 }
@@ -43,7 +44,7 @@ git worktree add --force "$WT" -B "$SRC" "origin/$SRC" >/dev/null 2>&1 \
 cd "$WT"
 
 ev MERGE "origin/$TGT"
-if git merge --no-ff --no-edit -m "chore: merge origin/$TGT into $SRC (!$IID)" "origin/$TGT" >/dev/null 2>&1; then
+if git merge --no-ff --no-edit -m "chore: merge origin/$TGT into $SRC (${SIGIL}$IID)" "origin/$TGT" >/dev/null 2>&1; then
   ev MERGE_CLEAN "no conflict markers — AI not needed (0 tokens)"
 else
   conflicts="$(git diff --name-only --diff-filter=U)"
@@ -64,7 +65,7 @@ else
   ev AI_RESOLVE "$n file(s): $(printf '%s' "$conflicts" | tr '\n' ' ' | cut -c1-120)"
   AILOG="$LOGDIR/ai-$IID-$(date '+%Y%m%d-%H%M%S').log"
   set +e
-  claude -p "You are resolving git merge conflicts in a worktree (branch $SRC, origin/$TGT merged in, MR !$IID).
+  claude -p "You are resolving git merge conflicts in a worktree (branch $SRC, origin/$TGT merged in, ${SIGIL}$IID).
 
 Conflicting files:
 $conflicts
@@ -89,7 +90,7 @@ Rules:
   fi
   git add -A
   git commit --no-edit >/dev/null 2>&1 \
-    || git commit -m "chore: merge origin/$TGT into $SRC (!$IID)" >/dev/null
+    || git commit -m "chore: merge origin/$TGT into $SRC (${SIGIL}$IID)" >/dev/null
 fi
 
 ev VERIFY "${VERIFY_CMD:-<skipped>}"
@@ -101,5 +102,5 @@ ev PUSH "origin $SRC"
 git push origin "HEAD:$SRC" >/dev/null 2>&1 || fail "push rejected (branch moved ahead?)"
 
 ev DONE "merged origin/$TGT, verify green, pushed"
-notify "MR !$IID fixed ✓" "$SRC: merge $TGT + verify + push"
+notify "${SIGIL}$IID fixed ✓" "$SRC: merge $TGT + verify + push"
 cleanup_wt
