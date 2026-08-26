@@ -64,6 +64,20 @@ else
 
   ev AI_RESOLVE "$n file(s): $(printf '%s' "$conflicts" | tr '\n' ' ' | cut -c1-120)"
   AILOG="$LOGDIR/ai-$IID-$(date '+%Y%m%d-%H%M%S').log"
+
+  # Project-specific resolution rules, appended to the default policy.
+  # RESOLVE_POLICY_FILE is relative to the merge-medic root (or absolute).
+  policy=""
+  if [ -n "${RESOLVE_POLICY_FILE:-}" ]; then
+    pf="$RESOLVE_POLICY_FILE"
+    [ "${pf#/}" = "$pf" ] && pf="$ROOT/$pf"
+    if [ -f "$pf" ]; then
+      policy="$(printf '\n\nProject-specific resolution rules (they override the defaults above where they conflict):\n%s' "$(cat "$pf")")"
+    else
+      ev AI_RESOLVE "WARN: RESOLVE_POLICY_FILE not found: $pf"
+    fi
+  fi
+
   set +e
   claude -p "You are resolving git merge conflicts in a worktree (branch $SRC, origin/$TGT merged in, ${SIGIL}$IID).
 
@@ -74,7 +88,7 @@ Rules:
 - Resolve ALL conflict markers (<<<<<<< ======= >>>>>>>), preserving the intent of both sides; when in doubt, prefer $SRC for its own feature code and $TGT for everything else.
 - Do not rewrite anything outside the conflicted hunks. No refactoring.
 - After editing: git add each resolved file. Do NOT commit, do NOT push.
-- Finish with a short text summary of what you resolved and how." \
+- Finish with a short text summary of what you resolved and how.$policy" \
     --model "${CLAUDE_MODEL:-opus}" \
     --permission-mode acceptEdits \
     --allowedTools "Read Edit Write Glob Grep Bash(git:*)" \
