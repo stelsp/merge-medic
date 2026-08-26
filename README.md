@@ -67,7 +67,7 @@ Requirements: macOS, [`glab`](https://gitlab.com/gitlab-org/cli) (authenticated)
 `jq`, `git`, [Claude Code CLI](https://code.claude.com).
 
 ```bash
-git clone https://github.com/YOU/merge-medic && cd merge-medic
+git clone https://github.com/stelsp/merge-medic && cd merge-medic
 ./install.sh          # deps check, config.env, launchd job (DRY_RUN by default)
 vim config.env        # project, host, verify command
 mrwatch log -f        # watch a few dry ticks
