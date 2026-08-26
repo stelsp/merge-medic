@@ -35,6 +35,8 @@ merge-medic sits exactly in that gap: **automatic + merge-based + AI-resolved
 
 ## Live dashboard
 
+![mrwatch top — live dashboard](docs/demo.gif)
+
 ```
 merge-medic — live   17:46:24
   daemon on · AI budget 1/6 · active fixers: 1
