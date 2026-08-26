@@ -17,7 +17,7 @@ LABEL="com.merge-medic.watch"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 OS="$(uname -s)"
 # shellcheck source=/dev/null
-source "$ROOT/config.env" 2>/dev/null || true
+[ -f "$ROOT/config.env" ] && source "$ROOT/config.env"
 
 daemon_loaded() {
   if [ "$OS" = "Darwin" ]; then
@@ -33,13 +33,23 @@ YLW=$(tput setaf 3 2>/dev/null || true); DIM=$(tput dim 2>/dev/null || true)
 
 latest_ai_log() { ls -t "$ROOT"/logs/ai-*.log 2>/dev/null | head -1; }
 
-# phase → percent for the progress bar
-phase_pct() {
-  case "$1" in
-    START) echo 5;; WORKTREE) echo 15;; MERGE) echo 30;; MERGE_CLEAN) echo 55;;
-    AI_RESOLVE) echo 55;; VERIFY) echo 78;; PUSH) echo 92;; DONE) echo 100;; FAIL) echo 100;; *) echo 0;;
-  esac
+# phase → [base pct, next pct, avg duration s] for the interpolated bar
+phase_base() { case "$1" in START) echo 3;; WORKTREE) echo 10;; MERGE) echo 25;; MERGE_CLEAN|AI_RESOLVE) echo 45;; VERIFY) echo 75;; PUSH) echo 92;; DONE|FAIL) echo 100;; *) echo 0;; esac; }
+phase_next() { case "$1" in START) echo 10;; WORKTREE) echo 25;; MERGE) echo 45;; MERGE_CLEAN|AI_RESOLVE) echo 75;; VERIFY) echo 92;; PUSH) echo 99;; *) echo 100;; esac; }
+phase_avg()  { case "$1" in START) echo 3;; WORKTREE) echo 5;; MERGE) echo 10;; MERGE_CLEAN) echo 2;; AI_RESOLVE) echo 90;; VERIFY) echo 150;; PUSH) echo 5;; *) echo 1;; esac; }
+
+# interpolate percent within the current phase by elapsed time vs its average
+phase_pct() { # $1=phase $2=seconds spent in this phase
+  local base next avg span prog
+  base="$(phase_base "$1")"; next="$(phase_next "$1")"; avg="$(phase_avg "$1")"
+  [ "$base" -ge 100 ] && { echo 100; return; }
+  span=$(( next - base ))
+  prog=$(( ${2:-0} * span / avg ))
+  [ "$prog" -gt "$span" ] && prog=$span
+  echo $(( base + prog ))
 }
+
+SPINA=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 draw_bar() { # $1=pct $2=width
   local pct=$1 w=$2 filled i out=''
   filled=$(( pct * w / 100 ))
@@ -102,44 +112,101 @@ case "$cmd" in
     ;;
 
   top)
+    # bash fallback dashboard; `mrtop` (Go/bubbletea) is used instead when built
+    if [ -x "$ROOT/bin/mrtop" ] && [ "${2:-}" != "--once" ] && [ "${MRWATCH_PLAIN:-0}" != "1" ]; then
+      exec "$ROOT/bin/mrtop" "$ROOT"
+    fi
     trap 'tput cnorm 2>/dev/null; exit 0' INT TERM
     tput civis 2>/dev/null || true
+    LOGP=0; tick=0
     while true; do
+      now="$(date +%s)"
+      tick=$((tick + 1))
+      sp="${SPINA[$((tick % 10))]}"
       out=""
       out+="${B}merge-medic — live${N}   $(date '+%H:%M:%S')\n"
       today="$(date '+%Y-%m-%d')"
+      day0="$(date -j -f '%Y-%m-%d %H:%M:%S' "$today 00:00:00" +%s 2>/dev/null || date -d "$today" +%s 2>/dev/null || echo 0)"
       spent="$(cat "$ROOT/state/budget-$today" 2>/dev/null || echo 0)"
       nfix="$(pgrep -f "$ROOT/fix-mr.sh" 2>/dev/null | wc -l | tr -d ' ')" || nfix=0
       daemon_loaded && d="${GRN}on${N}" || d="${RED}off${N}"
-      out+="  daemon $d · AI budget $spent/${DAILY_AGENT_RUNS:-?} · active fixers: $nfix\n\n"
-      shown=0
+
+      # today's counters from the phase logs
+      ok=0; bad=0; clean=0; ai=0
+      for p in "$ROOT"/state/progress-*.log; do
+        [ -e "$p" ] || continue
+        while IFS='|' read -r ets ephase _; do
+          [ "${ets:-0}" -lt "$day0" ] && continue
+          case "$ephase" in
+            DONE) ok=$((ok+1));; FAIL) bad=$((bad+1));;
+            MERGE_CLEAN) clean=$((clean+1));; AI_RESOLVE) ai=$((ai+1));;
+          esac
+        done < "$p"
+      done
+      out+="  daemon $d · AI budget $spent/${DAILY_AGENT_RUNS:-?} · active: $nfix · today: ${GRN}$ok fixed${N} / ${RED}$bad failed${N} · $clean clean, $ai AI\n\n"
+
+      shown=0; newest_log=""
       for p in "$ROOT"/state/progress-*.log; do
         [ -e "$p" ] || continue
         iid="${p##*progress-}"; iid="${iid%.log}"
         lastline="$(tail -1 "$p" 2>/dev/null)"; [ -z "$lastline" ] && continue
         ts="${lastline%%|*}"; rest="${lastline#*|}"; phase="${rest%%|*}"; detail="${rest#*|}"
         t0line="$(head -1 "$p")"; t0="${t0line%%|*}"
+        active=1; { [ "$phase" = "DONE" ] || [ "$phase" = "FAIL" ]; } && active=0
         # hide DONE/FAIL older than 2 hours
-        if [ "$phase" = "DONE" ] || [ "$phase" = "FAIL" ]; then
-          [ $(( $(date +%s) - ts )) -gt 7200 ] && continue
-        fi
-        pct="$(phase_pct "$phase")"
-        el=$(( ${ts:-0} - ${t0:-0} )); [ "$phase" != "DONE" ] && [ "$phase" != "FAIL" ] && el=$(( $(date +%s) - t0 ))
+        [ "$active" = "0" ] && [ $(( now - ts )) -gt 7200 ] && continue
+        inphase=$(( now - ${ts:-0} )); [ "$active" = "0" ] && inphase=0
+        pct="$(phase_pct "$phase" "$inphase")"
+        el=$(( ${ts:-0} - ${t0:-0} )); [ "$active" = "1" ] && el=$(( now - t0 ))
         case "$phase" in
           DONE) c="$GRN";; FAIL) c="$RED";; AI_RESOLVE) c="$YLW";; *) c="";;
         esac
-        printf -v line "  ${B}!%-4s${N} [%s] %3d%%  ${c}%-11s${N} %3dm%02ds  ${DIM}%s${N}" \
-          "$iid" "$(draw_bar "$pct" 22)" "$pct" "$phase" $((el/60)) $((el%60)) "${detail:0:60}"
+        mark=' '; [ "$active" = "1" ] && { mark="$sp"; newest_log="$iid"; }
+        printf -v line "  %s ${B}!%-4s${N} [%s] %3d%%  ${c}%-11s${N} %3dm%02ds  ${DIM}%s${N}" \
+          "$mark" "$iid" "$(draw_bar "$pct" 22)" "$pct" "$phase" $((el/60)) $((el%60)) "${detail:0:56}"
         out+="$line\n"
         shown=$((shown+1))
       done
       [ "$shown" = "0" ] && out+="  ${DIM}no active or recent fixers — no conflicts${N}\n"
-      out+="\n  ${DIM}phases: START→WORKTREE→MERGE→AI_RESOLVE|MERGE_CLEAN→VERIFY→PUSH→DONE · q/Ctrl-C quits${N}\n"
+
+      # all open MRs from the last watcher tick (state cache, no requests)
+      out+="\n  ${B}MRs (last tick):${N} "
+      row=""
+      for f in "$ROOT"/state/mr-*; do
+        [ -e "$f" ] || continue
+        iid="${f##*/mr-}"; st="$(cut -d' ' -f1 "$f")"
+        case "$st" in
+          conflict)  row+="${RED}!$iid✗${N} " ;;
+          mergeable) row+="${GRN}!$iid✓${N} " ;;
+          *)         row+="${DIM}!$iid?${N} " ;;
+        esac
+      done
+      out+="${row:-${DIM}none${N}}\n"
+
+      # optional log panel: tail of the newest active fixer's log
+      if [ "$LOGP" = "1" ]; then
+        lg=""
+        if [ -n "$newest_log" ]; then
+          lg="$(ls -t "$ROOT"/logs/ai-"$newest_log"-*.log "$ROOT"/logs/fixer-"$newest_log".log 2>/dev/null | head -1)"
+        fi
+        [ -z "$lg" ] && lg="$(ls -t "$ROOT"/logs/ai-*.log "$ROOT"/logs/fixer-*.log 2>/dev/null | head -1)"
+        out+="\n  ${B}log${N} ${DIM}${lg##*/}${N}\n"
+        if [ -n "$lg" ]; then
+          while IFS= read -r ln; do out+="  ${DIM}│${N} ${ln:0:100}\n"; done < <(tail -8 "$lg" 2>/dev/null)
+        fi
+      fi
+
+      out+="\n  ${DIM}q quit · l log panel · r run tick · p pause/resume · phases: START→WORKTREE→MERGE→AI|CLEAN→VERIFY→PUSH→DONE${N}\n"
       if [ "${2:-}" = "--once" ]; then printf "%b" "$out"; exit 0; fi
       printf '\033[H\033[2J'
       printf "%b" "$out"
       read -r -t 1 -n 1 key 2>/dev/null || true
-      [ "${key:-}" = "q" ] && { tput cnorm 2>/dev/null; exit 0; }
+      case "${key:-}" in
+        q) tput cnorm 2>/dev/null; exit 0 ;;
+        l) LOGP=$((1 - LOGP)) ;;
+        r) nohup bash "$ROOT/watch.sh" >/dev/null 2>&1 & ;;
+        p) if daemon_loaded; then "$0" pause >/dev/null; else "$0" resume >/dev/null; fi ;;
+      esac
     done
     ;;
 
