@@ -1,0 +1,182 @@
+#!/bin/bash
+# mrwatch — console interface to merge-medic.
+#   mrwatch             status: daemon, mode, budget, fixers, MR states
+#   mrwatch top         live dashboard: per-fixer phase progress bars (q quits)
+#   mrwatch log [-f]    tail watch.log (-f = follow)
+#   mrwatch agent [iid] tail the AI resolver log (latest, or for MR <iid>)
+#   mrwatch mrs         live GitLab poll: mergeability of all open MRs
+#   mrwatch run         run a watcher tick right now
+#   mrwatch pause       unload the launchd job (until resume)
+#   mrwatch resume      load the launchd job back
+set -euo pipefail
+
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do SELF="$(readlink "$SELF")"; done
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
+LABEL="com.merge-medic.watch"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+# shellcheck source=/dev/null
+source "$ROOT/config.env" 2>/dev/null || true
+
+B=$(tput bold 2>/dev/null || true); N=$(tput sgr0 2>/dev/null || true)
+RED=$(tput setaf 1 2>/dev/null || true); GRN=$(tput setaf 2 2>/dev/null || true)
+YLW=$(tput setaf 3 2>/dev/null || true); DIM=$(tput dim 2>/dev/null || true)
+
+latest_ai_log() { ls -t "$ROOT"/logs/ai-*.log 2>/dev/null | head -1; }
+
+# phase → percent for the progress bar
+phase_pct() {
+  case "$1" in
+    START) echo 5;; WORKTREE) echo 15;; MERGE) echo 30;; MERGE_CLEAN) echo 55;;
+    AI_RESOLVE) echo 55;; VERIFY) echo 78;; PUSH) echo 92;; DONE) echo 100;; FAIL) echo 100;; *) echo 0;;
+  esac
+}
+draw_bar() { # $1=pct $2=width
+  local pct=$1 w=$2 filled i out=''
+  filled=$(( pct * w / 100 ))
+  for ((i=0; i<w; i++)); do
+    if (( i < filled )); then out+='█'; else out+='░'; fi
+  done
+  printf '%s' "$out"
+}
+
+cmd="${1:-status}"
+case "$cmd" in
+  status)
+    echo "${B}merge-medic${N}"
+
+    if launchctl list 2>/dev/null | grep -q "$LABEL"; then
+      echo "  daemon  : ${GRN}loaded${N} (launchd)"
+    else
+      echo "  daemon  : ${RED}NOT loaded${N} — mrwatch resume"
+    fi
+
+    if [ "${DRY_RUN:-1}" = "1" ]; then
+      echo "  mode    : ${YLW}DRY_RUN${N} (detect & log only)"
+    else
+      echo "  mode    : ${GRN}LIVE${N}"
+    fi
+    [ "${NOTIFY:-0}" = "1" ] && echo "  notify  : on (${NOTIFY_SOUND:-Submarine})" || echo "  notify  : off"
+
+    today="$(date '+%Y-%m-%d')"
+    spent="$(cat "$ROOT/state/budget-$today" 2>/dev/null || echo 0)"
+    echo "  budget  : $spent/${DAILY_AGENT_RUNS:-?} AI runs today"
+
+    last="$(tail -1 "$ROOT/logs/watch.log" 2>/dev/null | cut -d' ' -f1,2)"
+    echo "  last run: ${last:-no log yet}"
+
+    fpids="$(pgrep -f "$ROOT/fix-mr.sh" 2>/dev/null || true)"
+    if [ -n "$fpids" ]; then
+      echo "  fixers  : ${GRN}RUNNING${N} ($(echo "$fpids" | wc -l | tr -d ' ')) — mrwatch top"
+    else
+      flog="$(latest_ai_log)"
+      [ -n "$flog" ] && echo "  fixers  : idle  ${DIM}last AI log: ${flog##*/}${N}" \
+                     || echo "  fixers  : never ran yet"
+    fi
+
+    echo "  ${B}MRs (from state, no requests):${N}"
+    found=0
+    for f in "$ROOT"/state/mr-*; do
+      [ -f "$f" ] || continue
+      iid="${f##*/mr-}"
+      st="$(cut -d' ' -f1 "$f")"
+      mark=""
+      [ -f "$ROOT/state/tried-$iid" ] && mark=" ${DIM}(this SHA pair already tried)${N}"
+      case "$st" in
+        conflict) echo "    !$iid  ${RED}$st${N}$mark"; found=1 ;;
+        mergeable) echo "    !$iid  ${GRN}$st${N}" ;;
+        *) echo "    !$iid  $st" ;;
+      esac
+    done
+    [ "$found" = "0" ] && echo "    ${DIM}no conflicts in the last tick${N}"
+    echo "  ${DIM}live check: mrwatch mrs · fixer progress: mrwatch top${N}"
+    ;;
+
+  top)
+    trap 'tput cnorm 2>/dev/null; exit 0' INT TERM
+    tput civis 2>/dev/null || true
+    while true; do
+      out=""
+      out+="${B}merge-medic — live${N}   $(date '+%H:%M:%S')\n"
+      today="$(date '+%Y-%m-%d')"
+      spent="$(cat "$ROOT/state/budget-$today" 2>/dev/null || echo 0)"
+      nfix="$(pgrep -f "$ROOT/fix-mr.sh" 2>/dev/null | wc -l | tr -d ' ')" || nfix=0
+      launchctl list 2>/dev/null | grep -q "$LABEL" && d="${GRN}on${N}" || d="${RED}off${N}"
+      out+="  daemon $d · AI budget $spent/${DAILY_AGENT_RUNS:-?} · active fixers: $nfix\n\n"
+      shown=0
+      for p in $(ls -t "$ROOT"/state/progress-*.log 2>/dev/null); do
+        iid="${p##*progress-}"; iid="${iid%.log}"
+        lastline="$(tail -1 "$p" 2>/dev/null)"; [ -z "$lastline" ] && continue
+        ts="${lastline%%|*}"; rest="${lastline#*|}"; phase="${rest%%|*}"; detail="${rest#*|}"
+        t0line="$(head -1 "$p")"; t0="${t0line%%|*}"
+        # hide DONE/FAIL older than 2 hours
+        if [ "$phase" = "DONE" ] || [ "$phase" = "FAIL" ]; then
+          [ $(( $(date +%s) - ts )) -gt 7200 ] && continue
+        fi
+        pct="$(phase_pct "$phase")"
+        el=$(( ${ts:-0} - ${t0:-0} )); [ "$phase" != "DONE" ] && [ "$phase" != "FAIL" ] && el=$(( $(date +%s) - t0 ))
+        case "$phase" in
+          DONE) c="$GRN";; FAIL) c="$RED";; AI_RESOLVE) c="$YLW";; *) c="";;
+        esac
+        printf -v line "  ${B}!%-4s${N} [%s] %3d%%  ${c}%-11s${N} %3dm%02ds  ${DIM}%s${N}" \
+          "$iid" "$(draw_bar "$pct" 22)" "$pct" "$phase" $((el/60)) $((el%60)) "${detail:0:60}"
+        out+="$line\n"
+        shown=$((shown+1))
+      done
+      [ "$shown" = "0" ] && out+="  ${DIM}no active or recent fixers — no conflicts${N}\n"
+      out+="\n  ${DIM}phases: START→WORKTREE→MERGE→AI_RESOLVE|MERGE_CLEAN→VERIFY→PUSH→DONE · q/Ctrl-C quits${N}\n"
+      if [ "${2:-}" = "--once" ]; then printf "%b" "$out"; exit 0; fi
+      printf '\033[H\033[2J'
+      printf "%b" "$out"
+      read -r -t 1 -n 1 key 2>/dev/null || true
+      [ "${key:-}" = "q" ] && { tput cnorm 2>/dev/null; exit 0; }
+    done
+    ;;
+
+  log)
+    if [ "${2:-}" = "-f" ]; then tail -40 -f "$ROOT/logs/watch.log"; else tail -40 "$ROOT/logs/watch.log"; fi
+    ;;
+
+  agent)
+    if [ -n "${2:-}" ] && [ "${2:-}" != "-f" ]; then
+      flog="$(ls -t "$ROOT"/logs/ai-"$2"-*.log "$ROOT"/logs/fixer-"$2".log 2>/dev/null | head -1)"
+    else
+      flog="$(latest_ai_log)"
+    fi
+    [ -z "$flog" ] && { echo "no AI logs yet"; exit 0; }
+    echo "${DIM}$flog${N}"
+    if [ "${2:-}" = "-f" ] || [ "${3:-}" = "-f" ]; then tail -50 -f "$flog"; else tail -50 "$flog"; fi
+    ;;
+
+  mrs)
+    export GITLAB_HOST
+    ENC="${PROJECT_PATH//\//%2F}"
+    glab api "projects/$ENC/merge_requests?state=opened&per_page=100" 2>/dev/null \
+      | jq -r '.[] | [.iid, .detailed_merge_status, .source_branch, .target_branch, .title] | @tsv' \
+      | while IFS=$'\t' read -r iid st src tgt title; do
+          case "$st" in
+            conflict)  c="$RED" ;;
+            mergeable) c="$GRN" ;;
+            *)         c="$YLW" ;;
+          esac
+          printf "  !%-4s ${c}%-22s${N} %s -> %s  ${DIM}%s${N}\n" "$iid" "$st" "$src" "$tgt" "${title:0:50}"
+        done
+    ;;
+
+  run)
+    echo "running a watcher tick…"
+    bash "$ROOT/watch.sh"
+    ;;
+
+  pause)
+    launchctl unload "$PLIST" && echo "watcher unloaded (mrwatch resume to bring back)"
+    ;;
+
+  resume)
+    launchctl load "$PLIST" && echo "watcher loaded"
+    ;;
+
+  *)
+    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+esac

@@ -1,0 +1,10 @@
+# local runtime — never committed
+config.env
+logs/
+state/
+worktrees/
+.lock/
+*.log
+
+# macOS
+.DS_Store
