@@ -73,6 +73,19 @@ merge-medic — live   17:46:24
 Desktop notifications (macOS `osascript` / Linux `notify-send`) fire on:
 new conflict, fixer started, fixed ✓ / failed.
 
+### Resolution policy
+
+Mechanics first: git itself merges everything it can — the AI only ever sees
+files with real conflict markers. The default policy handed to the resolver:
+preserve both sides' intent; when in doubt the **source branch wins for its
+own feature code, the target for everything else**; nothing outside the
+conflicted hunks is touched; the agent stages files but cannot commit or
+push. `RESOLVE_POLICY_FILE=policy.md` in config.env appends your
+project-specific rules to that prompt (e.g. *"in `migrations/` keep both
+sides"*, *"CHANGELOG.md: concatenate, target's entries first"*). Whatever the
+AI produces still has to survive the marker re-check and `VERIFY_CMD` before
+anything is pushed.
+
 ## Install
 
 Requirements: macOS (launchd) or Linux (systemd user timer), `jq`, `git`,
