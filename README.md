@@ -10,7 +10,9 @@ minutes with plain bash + your forge CLI
 fixer takes over:
 
 ```
-WORKTREE → MERGE → AI_RESOLVE | MERGE_CLEAN → VERIFY → PUSH
+WORKTREE → MERGE → AI_RESOLVE | MERGE_CLEAN → VERIFY → TESTS → REGRESSION → PUSH
+                        ↓
+                   ESCALATED (needs human)
 ```
 
 Claude is invoked **only** when the merge leaves real conflict markers in
@@ -64,7 +66,9 @@ merge-medic — live   17:46:24
 | SHA-pair dedup | a failed `(source_sha, target_sha)` pair is never retried until a branch moves |
 | Daily AI budget | hard cap on Claude invocations per day (`DAILY_AGENT_RUNS`) |
 | Clean-merge shortcut | no conflict markers → no AI call at all |
-| Verify gate | `VERIFY_CMD` (typecheck/build/tests) must pass before any push |
+| Verify gate | `VERIFY_CMD` (typecheck/build) must pass before any push |
+| Test gates | `TEST_CMD_TEMPLATE` runs tests focused on the conflicted files; `REGRESSION_CMD` runs the full suite after AI resolutions |
+| Escalation | `ESCALATE_PATTERNS` paths are never resolved by the bot; the AI itself refuses to guess on incompatible substantive changes — both end as `ESCALATED (needs human)` |
 | Excluded branches | branches you are actively pushing to are ignored |
 | Dedicated clone | fixers work in their own clone + per-MR worktrees, never in your checkout |
 | Scoped AI | resolver runs headless with a minimal tool allowlist; it cannot push |
@@ -76,15 +80,27 @@ new conflict, fixer started, fixed ✓ / failed.
 ### Resolution policy
 
 Mechanics first: git itself merges everything it can — the AI only ever sees
-files with real conflict markers. The default policy handed to the resolver:
-preserve both sides' intent; when in doubt the **source branch wins for its
-own feature code, the target for everything else**; nothing outside the
-conflicted hunks is touched; the agent stages files but cannot commit or
-push. `RESOLVE_POLICY_FILE=policy.md` in config.env appends your
-project-specific rules to that prompt (e.g. *"in `migrations/` keep both
-sides"*, *"CHANGELOG.md: concatenate, target's entries first"*). Whatever the
-AI produces still has to survive the marker re-check and `VERIFY_CMD` before
-anything is pushed.
+files with real conflict markers, rendered in **zdiff3** style so the
+common-ancestor version sits inside every marker: the resolver sees what each
+side actually changed, not just two competing texts. The prompt also carries
+**intent context** — each side's commit history over the conflicted files and
+the MR title.
+
+The default policy: preserve both sides' intent; when in doubt the **source
+branch wins for its own feature code, the target for everything else**;
+nothing outside the conflicted hunks is touched; the agent stages files but
+cannot commit or push. `RESOLVE_POLICY_FILE=policy.md` appends your
+project-specific rules (e.g. *"in `migrations/` keep both sides"*).
+
+When guessing would be dangerous, the bot **doesn't**: conflicts in
+`ESCALATE_PATTERNS` paths, and cases where the AI judges both sides'
+substantive changes incompatible, end as `ESCALATED (needs human)` — with an
+MR comment when `POST_RESOLUTION_NOTE=1`.
+
+Whatever the AI produces still has to survive the marker re-check,
+`VERIFY_CMD`, the focused `TEST_CMD_TEMPLATE` run and the `REGRESSION_CMD`
+suite before anything is pushed — and with `POST_RESOLUTION_NOTE=1` the
+resolver's per-file reasoning is posted to the MR for the human reviewer.
 
 ## Install
 

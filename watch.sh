@@ -196,11 +196,11 @@ running_fixers() { pgrep -f "$ROOT/fix-mr.sh" 2>/dev/null | wc -l | tr -d ' '; }
 
 notify "Conflicts: $count MR(s)" "Launching fixers (mrwatch top for progress)"
 launched=0
-while IFS=$'\t' read -r iid src tgt _; do
+while IFS=$'\t' read -r iid src tgt title; do
   [ -z "$iid" ] && continue
   while [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; do sleep 5; done
-  log "  fixer -> !$iid  ($src -> $tgt); log: fixer-$iid.log"
-  nohup bash "$ROOT/fix-mr.sh" "$iid" "$src" "$tgt" >> "$LOGDIR/fixer-$iid.log" 2>&1 &
+  log "  fixer -> $SIGIL$iid  ($src -> $tgt); log: fixer-$iid.log"
+  nohup bash "$ROOT/fix-mr.sh" "$iid" "$src" "$tgt" "$title" >> "$LOGDIR/fixer-$iid.log" 2>&1 &
   launched=$((launched + 1))
   sleep 1
 done <<<"$targets"
