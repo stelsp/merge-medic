@@ -41,15 +41,21 @@ escalate() {
   exit 2
 }
 
-# Comment on the MR/PR (POST_RESOLUTION_NOTE=1). Never fatal.
+# Comment on the MR/PR (POST_RESOLUTION_NOTE=1). Never fatal, but failures
+# land in the fixer log — a silently lost note is a blind spot.
 post_note() {
   [ "${POST_RESOLUTION_NOTE:-0}" = "1" ] || return 0
   local body="$1"
-  if [ "${PROVIDER:-gitlab}" = "github" ]; then
-    gh pr comment "$IID" --repo "$PROJECT_PATH" --body "$body" >/dev/null 2>&1 || true
-  else
-    ( cd "$WT" 2>/dev/null || cd "$WATCH_REPO"; GITLAB_HOST="$GITLAB_HOST" glab mr note "$IID" -m "$body" >/dev/null 2>&1 ) || true
-  fi
+  {
+    if [ "${PROVIDER:-gitlab}" = "github" ]; then
+      gh pr comment "$IID" --repo "$PROJECT_PATH" --body "$body" \
+        || echo "post_note: gh pr comment failed (exit $?)"
+    else
+      ( cd "$WT" 2>/dev/null || cd "$WATCH_REPO"
+        GITLAB_HOST="${GITLAB_HOST:-}" glab mr note create "$IID" -m "$body" ) \
+        || echo "post_note: glab mr note failed (exit $?)"
+    fi
+  } >> "$LOGDIR/fixer-$IID.log" 2>&1 || true
 }
 
 : > "$PROG"
