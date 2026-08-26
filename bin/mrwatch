@@ -104,7 +104,8 @@ case "$cmd" in
       launchctl list 2>/dev/null | grep -q "$LABEL" && d="${GRN}on${N}" || d="${RED}off${N}"
       out+="  daemon $d · AI budget $spent/${DAILY_AGENT_RUNS:-?} · active fixers: $nfix\n\n"
       shown=0
-      for p in $(ls -t "$ROOT"/state/progress-*.log 2>/dev/null); do
+      for p in "$ROOT"/state/progress-*.log; do
+        [ -e "$p" ] || continue
         iid="${p##*progress-}"; iid="${iid%.log}"
         lastline="$(tail -1 "$p" 2>/dev/null)"; [ -z "$lastline" ] && continue
         ts="${lastline%%|*}"; rest="${lastline#*|}"; phase="${rest%%|*}"; detail="${rest#*|}"
