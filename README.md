@@ -47,7 +47,14 @@ merge-medic — live   17:46:24
   !97   [████████████░░░░░░░░░░]  55%  AI_RESOLVE  1m40s  3 file(s): map.ts acl.ts index.ts
 ```
 
-`mrwatch top` — redraws every second from the fixers' phase logs.
+`mrwatch top` — two implementations, same data:
+
+- **`mrtop`** (Go / [bubbletea](https://github.com/charmbracelet/bubbletea)):
+  row selection, inline log viewer (`enter`), spinner, smooth in-phase
+  progress, day counters. Built automatically by `install.sh` when Go is
+  present (`make build`).
+- **bash fallback**: same layout, spinner, interpolated bars, `l`/`r`/`p`
+  hotkeys — zero extra dependencies (`MRWATCH_PLAIN=1` forces it).
 
 ## How it stays cheap and safe
 

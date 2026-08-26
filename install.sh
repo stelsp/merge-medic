@@ -35,6 +35,17 @@ fi
 chmod +x "$ROOT/watch.sh" "$ROOT/fix-mr.sh" "$ROOT/bin/mrwatch"
 mkdir -p "$ROOT/logs" "$ROOT/state" "$ROOT/worktrees"
 
+# ── mrtop (optional Go TUI; bash `mrwatch top` is the fallback) ───────────────
+if command -v go >/dev/null 2>&1; then
+  if (cd "$ROOT" && make build >/dev/null 2>&1); then
+    echo "  built bin/mrtop (Go TUI dashboard)"
+  else
+    echo "  WARN: mrtop build failed — bash dashboard will be used"
+  fi
+else
+  echo "  NOTE: Go not found — mrwatch top uses the bash dashboard (install Go and re-run for mrtop)"
+fi
+
 # ── mrwatch on PATH ───────────────────────────────────────────────────────────
 mkdir -p "$HOME/.local/bin"
 ln -sf "$ROOT/bin/mrwatch" "$HOME/.local/bin/mrwatch"
