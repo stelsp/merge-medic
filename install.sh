@@ -50,6 +50,9 @@ elif [ "$OS" = "Linux" ] && ! command -v notify-send >/dev/null 2>&1; then
   echo "  NOTE: notify-send not found — desktop notifications will be silent"
 fi
 
+# record the poll interval for the dashboard's next-tick countdown
+grep -q "^POLL_INTERVAL=" "$ROOT/config.env" 2>/dev/null   || echo "POLL_INTERVAL=$INTERVAL" >> "$ROOT/config.env"
+
 chmod +x "$ROOT/watch.sh" "$ROOT/fix-mr.sh" "$ROOT/bin/mrwatch"
 mkdir -p "$ROOT/logs" "$ROOT/state" "$ROOT/worktrees"
 
