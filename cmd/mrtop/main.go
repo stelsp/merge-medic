@@ -359,8 +359,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "1":
 			m.screen = 0
 		case "2":
-			m.screen = 1
-		case "3":
 			m.screen = 2
 		case "esc":
 			if m.screen == 3 || m.screen == 4 {
@@ -783,9 +781,6 @@ func (m model) View() string {
 	if m.showHelp {
 		return m.helpView()
 	}
-	if m.screen == 1 {
-		return m.insightsView()
-	}
 	if m.screen == 2 {
 		return m.fleetView()
 	}
@@ -1046,6 +1041,24 @@ func (m model) View() string {
 	lb.WriteString(titledBox(lw, "ACTIVE", actMeta, strings.Join(act, "\n"), 0, m.focus == 3) + "\n")
 	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), 0, m.focus == 4) + "\n")
 
+	if len(s.hotspots) > 0 {
+		maxC := s.hotspots[0].count
+		if maxC < 1 {
+			maxC = 1
+		}
+		var hs []string
+		for i, h := range s.hotspots {
+			if i >= 4 {
+				break
+			}
+			hs = append(hs, fmt.Sprintf(" %s %s %s",
+				amber.Render(fmt.Sprintf("%2d×", h.count)),
+				yellow.Render(strings.Repeat("▪", max(1, h.count*10/maxC))),
+				dim.Render(trunc(h.file, lw-24))))
+		}
+		lb.WriteString(titledBox(lw, "HOTSPOTS", "most-conflicted files", strings.Join(hs, "\n"), 0, false) + "\n")
+	}
+
 	if m.showLog {
 		lb.WriteString(bold.Render("log ") + dim.Render(m.logName) + "\n")
 		for _, ln := range m.logLines {
@@ -1140,7 +1153,7 @@ func (m model) View() string {
 	key := func(k, label string) string { return amber.Render(k) + dim.Render(" "+label) }
 	sep := dim.Render(" · ")
 	b.WriteString(" " + key("tab", "focus") + sep + key("↑↓", "move") + sep + key("enter", "details") + sep +
-		key("o", "open") + sep + key("a", "approve") + sep + key("2", "insights") + sep + key("3", "fleet") + sep +
+		key("o", "open") + sep + key("a", "approve") + sep + key("2", "fleet") + sep +
 		key("?", "help") + sep + key("q", "quit"))
 	return b.String()
 }
@@ -1357,68 +1370,6 @@ func readInstances() []string {
 	return out
 }
 
-// insightsView — screen 2: conflict hotspots + spend analytics.
-func (m model) insightsView() string {
-	s := m.snap
-	var b strings.Builder
-	b.WriteString(m.renderBanner())
-	w := m.width
-
-	var hs []string
-	if len(s.hotspots) == 0 {
-		hs = append(hs, dim.Render(" no archived AI runs yet"))
-	}
-	maxC := 1
-	for _, h := range s.hotspots {
-		if h.count > maxC {
-			maxC = h.count
-		}
-	}
-	for _, h := range s.hotspots {
-		barW := h.count * 20 / maxC
-		hs = append(hs, fmt.Sprintf(" %s %s %s",
-			amber.Render(fmt.Sprintf("%3d×", h.count)),
-			yellow.Render(strings.Repeat("▪", barW)),
-			dim.Render(trunc(h.file, w-32))))
-	}
-	b.WriteString(titledBox(w, "HOTSPOTS", "most-conflicted files, all runs", strings.Join(hs, "\n"), 0, false) + "\n")
-
-	maxS := 0.01
-	for _, v := range s.spendDaily {
-		if v > maxS {
-			maxS = v
-		}
-	}
-	var spark strings.Builder
-	for _, v := range s.spendDaily {
-		idx := int(v / maxS * float64(len(sparkChars)-1))
-		spark.WriteRune(sparkChars[idx])
-	}
-	sp := []string{
-		fmt.Sprintf(" %s %s  %s", dim.Render("14d"), green.Render(spark.String()),
-			dim.Render(fmt.Sprintf("today ≈$%.2f · all $%.2f", s.spendToday, s.spend))),
-		"",
-		dim.Render(" most expensive runs:"),
-	}
-	if len(s.topRuns) == 0 {
-		sp = append(sp, dim.Render("  none yet"))
-	}
-	for _, r := range s.topRuns {
-		short := r.model
-		if i := strings.Index(short, "claude-"); i >= 0 {
-			short = short[i+7:]
-		}
-		sp = append(sp, fmt.Sprintf("  %s %s %s %s",
-			amber.Render(fmt.Sprintf("$%.2f", r.cost)),
-			bold.Render(fmt.Sprintf("!%-5s", r.iid)),
-			dim.Render(fmt.Sprintf("%-14s", trunc(short, 14))),
-			dim.Render(time.Unix(r.ts, 0).Format("02.01 15:04"))))
-	}
-	b.WriteString(titledBox(w, "SPEND", "$ per day + top runs", strings.Join(sp, "\n"), 0, false) + "\n")
-	b.WriteString(" " + amber.Render("1") + dim.Render(" main · ") + amber.Render("3") + dim.Render(" fleet · ") + amber.Render("q") + dim.Render(" quit"))
-	return b.String()
-}
-
 // fleetView — screen 3: every installed instance at a glance.
 func (m model) fleetView() string {
 	var b strings.Builder
@@ -1465,7 +1416,7 @@ func (m model) fleetView() string {
 		rows = append(rows, row)
 	}
 	b.WriteString(titledBox(m.width, "FLEET", fmt.Sprintf("%d instances", len(insts)), strings.Join(rows, "\n"), 0, true) + "\n")
-	b.WriteString(" " + amber.Render("↑↓") + dim.Render(" move · ") + amber.Render("enter") + dim.Render(" switch dashboard to instance · ") + amber.Render("1") + dim.Render(" main · ") + amber.Render("2") + dim.Render(" insights · ") + amber.Render("q") + dim.Render(" quit"))
+	b.WriteString(" " + amber.Render("↑↓") + dim.Render(" move · ") + amber.Render("enter") + dim.Render(" switch dashboard to instance · ") + amber.Render("1") + dim.Render(" main · ") + amber.Render("q") + dim.Render(" quit"))
 	return b.String()
 }
 
@@ -1478,7 +1429,7 @@ func (m model) helpView() string {
 		{"enter", "on focused RUNS / SPEND: full-screen breakdown with charts"},
 		{"+ / -", "budget shortcut while STATUS is focused (0 = unlimited)"},
 		{"← →", "change the selected STATUS setting (budget / delivery / model)"},
-		{"1 / 2 / 3", "screens: main dashboard / insights (hotspots, spend) / fleet (instances)"},
+		{"1 / 2", "screens: main dashboard / fleet (instances)"},
 		{"l", "toggle AI/fixer log panel for the selected MR"},
 		{"a", "approve the selected PLANNED plan (semi-auto branches)"},
 		{"r", "force a watcher tick now"},
