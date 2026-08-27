@@ -140,7 +140,7 @@ type model struct {
 	root       string
 	snap       snapshot
 	sel        int // cursor within the focused panel
-	focus      int // 0 = ACTIVE, 1 = HISTORY, 2 = LIVE
+	focus      int // 0 = STATUS, 1 = ACTIVE, 2 = HISTORY, 3 = LIVE
 	selH       int // HISTORY cursor (kept when switching focus)
 	liveOff    int // lines scrolled up from the tail of LIVE (0 = follow)
 	expanded   map[string]bool
@@ -211,7 +211,7 @@ func (m model) histRefs() []rowRef {
 
 // focusedRows returns the row list of the panel that owns the cursor.
 func (m model) focusedRows() []rowRef {
-	if m.focus == 1 {
+	if m.focus == 2 {
 		return m.histRefs()
 	}
 	return m.activeRefs()
@@ -220,10 +220,10 @@ func (m model) focusedRows() []rowRef {
 func (m model) selected() (rowRef, bool) {
 	rows := m.focusedRows()
 	sel := m.sel
-	if m.focus == 1 {
+	if m.focus == 2 {
 		sel = m.selH
 	}
-	if m.focus != 2 && sel >= 0 && sel < len(rows) {
+	if (m.focus == 1 || m.focus == 2) && sel >= 0 && sel < len(rows) {
 		return rows[sel], true
 	}
 	return rowRef{}, false
@@ -292,31 +292,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.expanded = map[string]bool{}
 			m.expandedMR = map[string]bool{}
 		case "tab":
-			m.focus = (m.focus + 1) % 3
+			m.focus = (m.focus + 1) % 4
 		case "up", "k":
 			switch m.focus {
-			case 0:
+			case 1:
 				if m.sel > 0 {
 					m.sel--
 				}
-			case 1:
+			case 2:
 				if m.selH > 0 {
 					m.selH--
 				}
-			case 2:
+			case 3:
 				m.liveOff += 3
 			}
 		case "down", "j":
 			switch m.focus {
-			case 0:
+			case 1:
 				if m.sel < len(m.activeRefs())-1 {
 					m.sel++
 				}
-			case 1:
+			case 2:
 				if m.selH < len(m.histRefs())-1 {
 					m.selH++
 				}
-			case 2:
+			case 3:
 				m.liveOff = max(0, m.liveOff-3)
 			}
 		case "enter", "e":
@@ -350,11 +350,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = c.Start()
 			}
 		case "+", "=":
+			if m.focus != 0 {
+				break
+			}
 			cur, _ := strconv.Atoi(m.snap.budgetMax)
 			cur++
 			setConfigVal(m.root, "DAILY_AGENT_RUNS", strconv.Itoa(cur))
 			m.snap.budgetMax = strconv.Itoa(cur)
 		case "-":
+			if m.focus != 0 {
+				break
+			}
 			cur, _ := strconv.Atoi(m.snap.budgetMax)
 			cur--
 			if cur < 0 {
@@ -480,7 +486,7 @@ func (m model) renderRow(it item, idx int, now int64, aw int) string {
 		segBar(it.phase, m.frame),
 		style.Render(fmt.Sprintf("%-10s", it.phase)), el/60, el%60,
 		dim.Render(tag), dim.Render(trunc(it.detail, aw-48)))
-	if idx == m.sel && m.focus == 0 {
+	if idx == m.sel && m.focus == 1 {
 		row = selRow.Render(row)
 	}
 	if m.expanded[it.key()] {
@@ -519,7 +525,7 @@ func (m model) renderHistRow(it item, idx int, aw int) string {
 		dim.Render(time.Unix(it.t0, 0).Format("02.01 15:04")),
 		style.Render(fmt.Sprintf("%-10s", it.phase)), dur,
 		dim.Render(tag), dim.Render(trunc(detail, aw-48)))
-	if idx == m.selH && m.focus == 1 {
+	if idx == m.selH && m.focus == 2 {
 		row = selRow.Render(row)
 	}
 	if m.expanded[it.key()] {
@@ -681,13 +687,14 @@ func (m model) View() string {
 		w3 := lw - w1 - w2
 		h := max(len(statusLines), max(len(runLines), len(spendLines)))
 		boxH := func(w int, title string, lines []string) string {
+			focused := title == "STATUS" && m.focus == 0
 			// clip (ANSI-aware) instead of letting lipgloss wrap — a wrapped
 			// line would inflate one box past the shared height
 			clipped := make([]string, len(lines))
 			for i, ln := range lines {
 				clipped[i] = truncate.String(ln, uint(max(1, w-4)))
 			}
-			return titledBox(w, title, "", strings.Join(clipped, "\n"), h, false)
+			return titledBox(w, title, "", strings.Join(clipped, "\n"), h, focused)
 		}
 		lb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top,
 			boxH(w1, "STATUS", statusLines),
@@ -713,16 +720,46 @@ func (m model) View() string {
 		if len(act) > 0 {
 			act = append(act, dim.Render(strings.Repeat("─", max(1, aw-1))))
 		}
+		// when every MR targets the same branch, drop the "→target" noise
+		// (the shared target moves into the panel title meta)
+		commonTgt := ""
+		uniform := true
+		for _, mr := range s.mrs {
+			if mr.tgt == "" {
+				continue
+			}
+			if commonTgt == "" {
+				commonTgt = mr.tgt
+			} else if mr.tgt != commonTgt {
+				uniform = false
+			}
+		}
 		// branch column: as wide as the widest ref actually present (capped) —
 		// a single long branch name must not push every title away
 		bcol := 0
 		refs := make([]string, len(s.mrs))
 		for i, mr := range s.mrs {
 			if mr.src != "" {
-				refs[i] = mr.src + "→" + mr.tgt
+				refs[i] = mr.src
+				if !uniform && mr.tgt != "" {
+					refs[i] += "→" + mr.tgt
+				}
 			}
 			if n := len([]rune(refs[i])); n > bcol {
 				bcol = n
+			}
+		}
+		// ⚡ marks only peer-to-peer clashes; hub members are covered by the
+		// collapsed "clashes with N MRs" line and would just be noise here
+		rcount := map[string]int{}
+		for _, pr := range s.radarPairs {
+			rcount[pr.a]++
+			rcount[pr.b]++
+		}
+		hot := map[string]bool{}
+		for _, pr := range s.radarPairs {
+			if rcount[pr.a] < 3 && rcount[pr.b] < 3 {
+				hot[pr.a], hot[pr.b] = true, true
 			}
 		}
 		bcol = min(bcol, min(24, aw/3))
@@ -751,13 +788,17 @@ func (m model) View() string {
 			if mr.updated == 0 {
 				age = "  "
 			}
-			row := fmt.Sprintf(" %s %s %s %s%s %s %s %s", ic, ciDot(mr.ci),
-				bold.Render(fmt.Sprintf("!%-4s", mr.iid)), gear,
+			zap := " "
+			if hot[mr.iid] {
+				zap = yellow.Render("⚡")
+			}
+			row := fmt.Sprintf(" %s %s %s %s%s%s %s %s %s", ic, ciDot(mr.ci),
+				bold.Render(fmt.Sprintf("!%-4s", mr.iid)), gear, zap,
 				dim.Render(fmt.Sprintf("%-*s", bcol, trunc(refs[i], bcol))),
 				dim.Render(fmt.Sprintf("%3s", age)),
 				dim.Render(fmt.Sprintf("%-8s", trunc(mr.author, 8))),
-				tstyle.Render(trunc(title, aw-(29+bcol))))
-			if idx == m.sel && m.focus == 0 {
+				titleStyled(title, tstyle, aw-(31+bcol)))
+			if idx == m.sel && m.focus == 1 {
 				row = selRow.Render(row)
 			}
 			if m.expandedMR[mr.iid] {
@@ -791,8 +832,31 @@ func (m model) View() string {
 	for hIdx, it := range s.histRows {
 		hist = append(hist, m.renderHistRow(it, hIdx, hw))
 	}
-	lb.WriteString(titledBox(lw, "ACTIVE", fmt.Sprintf("%d MRs", len(s.mrs)), strings.Join(act, "\n"), 0, m.focus == 0) + "\n")
-	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), 0, m.focus == 1) + "\n")
+	nConf := 0
+	tgtMeta := ""
+	for _, mr := range s.mrs {
+		if mr.status == "conflict" {
+			nConf++
+		}
+	}
+	if len(s.mrs) > 0 {
+		t := s.mrs[0].tgt
+		same := t != ""
+		for _, mr := range s.mrs {
+			if mr.tgt != t {
+				same = false
+			}
+		}
+		if same {
+			tgtMeta = " → " + t
+		}
+	}
+	actMeta := fmt.Sprintf("%d MRs%s", len(s.mrs), tgtMeta)
+	if nConf > 0 {
+		actMeta = fmt.Sprintf("%d MRs · %d✗%s", len(s.mrs), nConf, tgtMeta)
+	}
+	lb.WriteString(titledBox(lw, "ACTIVE", actMeta, strings.Join(act, "\n"), 0, m.focus == 1) + "\n")
+	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), 0, m.focus == 2) + "\n")
 
 	if m.showLog {
 		lb.WriteString(bold.Render("log ") + dim.Render(m.logName) + "\n")
@@ -831,7 +895,7 @@ func (m model) View() string {
 			}
 			body = strings.Join(wl, "\n")
 		}
-		liveBox := titledBox(liveW, "LIVE", badge, body, total-2, m.focus == 2)
+		liveBox := titledBox(liveW, "LIVE", badge, body, total-2, m.focus == 3)
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, liveBox) + "\n")
 	} else {
 		b.WriteString(lb.String())
@@ -865,7 +929,7 @@ func (m model) helpView() string {
 		{"enter / e", "details: phase timeline (runs) / MR info + clashes (MRs)"},
 		{"o", "open the selected MR/PR in the browser"},
 		{"tab", "cycle focus: ACTIVE → HISTORY → LIVE (j/k scrolls the log)"},
-		{"+ / -", "raise / lower the daily AI budget (0 = unlimited); saved to config.env"},
+		{"+ / -", "raise / lower the daily AI budget when STATUS is focused (0 = unlimited)"},
 		{"l", "toggle AI/fixer log panel for the selected MR"},
 		{"a", "approve the selected PLANNED plan (semi-auto branches)"},
 		{"r", "force a watcher tick now"},
@@ -1050,6 +1114,33 @@ var ciKnown = map[string]bool{
 	"success": true, "failed": true, "running": true, "pending": true,
 	"canceled": true, "skipped": true, "manual": true, "created": true,
 	"none": true, "preparing": true, "waiting_for_resource": true, "scheduled": true,
+}
+
+// titleStyled colors the conventional-commit type prefix of an MR title:
+// feat green, fix yellow, docs/chore/etc dim — the rest of the title neutral.
+func titleStyled(title string, base lipgloss.Style, budget int) string {
+	i := strings.Index(title, ":")
+	if i > 0 && i <= 12 {
+		typ := title[:i]
+		root := typ
+		if p := strings.IndexAny(typ, "(!"); p > 0 {
+			root = typ[:p]
+		}
+		var st lipgloss.Style
+		switch root {
+		case "feat":
+			st = green
+		case "fix", "hotfix":
+			st = yellow
+		case "docs", "chore", "refactor", "test", "ci", "build", "style", "perf":
+			st = dim
+		default:
+			return base.Render(trunc(title, budget))
+		}
+		rest := title[i:]
+		return st.Render(typ) + base.Render(trunc(rest, max(0, budget-len([]rune(typ)))))
+	}
+	return base.Render(trunc(title, budget))
 }
 
 // ciDot renders one colored pipeline-status dot for an open MR.
@@ -1298,6 +1389,11 @@ func readSnapshot(root string, width int) snapshot {
 		s.mrs = append(s.mrs, mr)
 	}
 	sort.Slice(s.mrs, func(i, j int) bool {
+		ci := s.mrs[i].status == "conflict"
+		cj := s.mrs[j].status == "conflict"
+		if ci != cj {
+			return ci // conflicted first — that's what the tool is about
+		}
 		a, _ := strconv.Atoi(s.mrs[i].iid)
 		b, _ := strconv.Atoi(s.mrs[j].iid)
 		return a > b
