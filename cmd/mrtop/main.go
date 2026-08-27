@@ -81,6 +81,8 @@ func (it item) key() string { return it.iid + "@" + strconv.FormatInt(it.t0, 10)
 
 type mrState struct{ iid, status, src, tgt, ci, title string }
 
+type radarPair struct{ a, b, srcA, srcB string }
+
 type snapshot struct {
 	activeRows, histRows []item
 	mrs                  []mrState
@@ -89,7 +91,7 @@ type snapshot struct {
 	ok, bad, esc         int
 	tok, tbad, tesc      int
 	tclean, tai          int
-	radar                []string // brewing MR-vs-MR conflict pairs
+	radarPairs           []radarPair // brewing MR-vs-MR conflict pairs
 	feed                 []string // pre-rendered live feed lines, oldest first
 	daily                []int    // DONE per day, last 14 days, oldest first
 	spendToday, spend    float64  // USD, from the CLI's own accounting
@@ -360,10 +362,34 @@ func (m model) renderTimeline(it item) string {
 var orbit = []rune("◐◓◑◒")
 
 // mrsRadar renders the brewing-conflict warnings for the ACTIVE box.
+// An MR clashing with 3+ others (a "hub" — usually one wide branch) is
+// collapsed into a single line instead of one line per pair.
 func (m model) mrsRadar(aw int) []string {
+	count := map[string]int{}
+	branch := map[string]string{}
+	for _, p := range m.snap.radarPairs {
+		count[p.a]++
+		count[p.b]++
+		branch[p.a], branch[p.b] = p.srcA, p.srcB
+	}
 	var out []string
-	for _, r := range m.snap.radar {
-		out = append(out, yellow.Render(" ⚡ "+trunc(r, aw-4)))
+	seenHub := map[string]bool{}
+	for _, p := range m.snap.radarPairs {
+		hub, other := "", ""
+		if count[p.a] >= 3 {
+			hub, other = p.a, p.b
+		} else if count[p.b] >= 3 {
+			hub, other = p.b, p.a
+		}
+		_ = other
+		if hub != "" {
+			if !seenHub[hub] {
+				seenHub[hub] = true
+				out = append(out, yellow.Render(trunc(fmt.Sprintf(" ⚡ !%s (%s) clashes with %d open MRs — first to merge wins", hub, branch[hub], count[hub]), aw-2)))
+			}
+			continue
+		}
+		out = append(out, yellow.Render(trunc(fmt.Sprintf(" ⚡ !%s × !%s  %s ↔ %s", p.a, p.b, p.srcA, p.srcB), aw-2)))
 	}
 	return out
 }
@@ -397,7 +423,17 @@ func (m model) View() string {
 		return section.Width(w - 2).Render(sectionTitle.Render(title) + "\n" + body)
 	}
 
-	// ── top strip: STATUS · RUNS · SPEND ──────────────────────────────────────
+	// ── layout: left column (status strip, ACTIVE, HISTORY) + LIVE at right ──
+	lw := m.width
+	liveW := 0
+	if wide {
+		liveW = m.width * 2 / 5
+		if liveW > 100 {
+			liveW = 100
+		}
+		lw = m.width - liveW
+	}
+
 	bmax, _ := strconv.Atoi(s.budgetMax)
 	bcur, _ := strconv.Atoi(s.budget)
 	budgetLine := fmt.Sprintf("%s %s %s/%s", dim.Render("ai-budget"), yellow.Render(gauge(bcur, bmax, 12)), s.budget, s.budgetMax)
@@ -424,33 +460,28 @@ func (m model) View() string {
 		spendLines = append(spendLines, dim.Render(s.modelLine))
 	}
 
-	if wide {
-		w1 := m.width / 3
-		w2 := m.width / 3
-		w3 := m.width - w1 - w2
-		// same height for all three boxes — mixed heights look ragged
+	var lb strings.Builder
+	if lw >= 100 {
+		w1 := lw / 3
+		w2 := lw / 3
+		w3 := lw - w1 - w2
 		h := max(len(statusLines), max(len(runLines), len(spendLines))) + 1
 		boxH := func(w int, title, body string) string {
 			return section.Width(w - 2).Height(h).Render(sectionTitle.Render(title) + "\n" + body)
 		}
-		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top,
+		lb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top,
 			boxH(w1, "STATUS", strings.Join(statusLines, "\n")),
 			boxH(w2, "RUNS", strings.Join(runLines, "\n")),
 			boxH(w3, "SPEND", strings.Join(spendLines, "\n"))) + "\n")
 	} else {
 		all := append(append(statusLines, runLines...), spendLines...)
-		b.WriteString(box(m.width, "STATUS", strings.Join(all, "\n")) + "\n")
+		lb.WriteString(box(lw, "STATUS", strings.Join(all, "\n")) + "\n")
 	}
 
-	// ── ACTIVE (fixers + open MRs) / HISTORY ──────────────────────────────────
+	// ── ACTIVE (fixers + open MRs + radar), then HISTORY, stacked ─────────────
 	idx := 0
-	lw, rw := m.width, m.width
-	if wide {
-		lw = m.width / 2
-		rw = m.width - lw
-	}
 	aw := lw - 4 // content width inside border+padding
-	hw := rw - 4
+	hw := lw - 4
 	var act []string
 	fixing := map[string]bool{}
 	for _, it := range s.activeRows {
@@ -474,7 +505,7 @@ func (m model) View() string {
 				bcol = n
 			}
 		}
-		bcol = min(bcol, min(18, aw/3))
+		bcol = min(bcol, min(24, aw/3))
 		for i, mr := range s.mrs {
 			ic := dim.Render("?")
 			switch mr.status {
@@ -514,25 +545,24 @@ func (m model) View() string {
 		hist = append(hist, m.renderHistRow(it, idx, hw))
 		idx++
 	}
-	actBox := box(lw, "ACTIVE", strings.Join(act, "\n"))
-	histBox := box(rw, "HISTORY", strings.Join(hist, "\n"))
-	if wide {
-		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, actBox, histBox) + "\n")
-	} else {
-		b.WriteString(actBox + "\n" + histBox + "\n")
-	}
+	lb.WriteString(box(lw, "ACTIVE", strings.Join(act, "\n")) + "\n")
+	lb.WriteString(box(lw, "HISTORY", strings.Join(hist, "\n")) + "\n")
 
 	if m.showLog {
-		b.WriteString(bold.Render("log ") + dim.Render(m.logName) + "\n")
+		lb.WriteString(bold.Render("log ") + dim.Render(m.logName) + "\n")
 		for _, ln := range m.logLines {
-			b.WriteString(dim.Render("│ ") + trunc(ln, m.width-4) + "\n")
+			lb.WriteString(dim.Render("│ ") + trunc(ln, lw-4) + "\n")
 		}
 	}
 
-	// ── LIVE feed fills whatever height is left ───────────────────────────────
-	used := lipgloss.Height(b.String())
-	feedH := m.height - used - 4
-	if feedH >= 3 {
+	// ── LIVE: full-height right column (wide) or bottom box (narrow) ──────────
+	if wide {
+		left := strings.TrimRight(lb.String(), "\n")
+		total := m.height - lipgloss.Height(m.renderBanner()) - 2
+		if h := lipgloss.Height(left); h > total {
+			total = h
+		}
+		feedH := total - 2
 		lines := s.feed
 		if len(lines) > feedH {
 			lines = lines[len(lines)-feedH:]
@@ -541,7 +571,23 @@ func (m model) View() string {
 		if body == "" {
 			body = dim.Render(" quiet — waiting for events")
 		}
-		b.WriteString(box(m.width, "LIVE", body) + "\n")
+		liveBox := section.Width(liveW - 2).Height(total - 2).Render(sectionTitle.Render("LIVE") + "\n" + body)
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, liveBox) + "\n")
+	} else {
+		b.WriteString(lb.String())
+		used := lipgloss.Height(b.String())
+		feedH := m.height - used - 4
+		if feedH >= 3 {
+			lines := s.feed
+			if len(lines) > feedH {
+				lines = lines[len(lines)-feedH:]
+			}
+			body := strings.Join(lines, "\n")
+			if body == "" {
+				body = dim.Render(" quiet — waiting for events")
+			}
+			b.WriteString(box(m.width, "LIVE", body) + "\n")
+		}
 	}
 
 	b.WriteString(dim.Render("↑↓ move · enter details · a approve · ? help · q quit"))
@@ -797,6 +843,19 @@ func trunc(s string, n int) string {
 	return s
 }
 
+// feedWidth returns the width the LIVE feed lines are truncated for —
+// the right column in the wide layout, the full terminal otherwise.
+func feedWidth(width int) int {
+	if width >= 110 {
+		lw := width * 2 / 5
+		if lw > 100 {
+			lw = 100
+		}
+		return lw - 1
+	}
+	return width
+}
+
 func readSnapshot(root string, width int) snapshot {
 	var s snapshot
 	now := time.Now()
@@ -902,7 +961,7 @@ func readSnapshot(root string, width int) snapshot {
 		}
 	}
 
-	s.feed = buildFeed(root, width)
+	s.feed = buildFeed(root, feedWidth(width))
 	s.spendToday, s.spend, s.modelLine = readTokens(root, day0)
 
 	// DONE per day for the last 14 days (activity sparkline)
@@ -926,7 +985,7 @@ func readSnapshot(root string, width int) snapshot {
 		for _, ln := range nonEmpty(strings.Split(string(data), "\n")) {
 			p := strings.Split(ln, "|")
 			if len(p) >= 4 {
-				s.radar = append(s.radar, fmt.Sprintf("!%s × !%s  %s ↔ %s", p[0], p[1], p[2], p[3]))
+				s.radarPairs = append(s.radarPairs, radarPair{p[0], p[1], p[2], p[3]})
 			}
 		}
 	}
