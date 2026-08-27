@@ -132,6 +132,23 @@ type snapshot struct {
 	daily                []int    // DONE per day, last 14 days, oldest first
 	spendToday, spend    float64  // USD, from the CLI's own accounting
 	modelLine            string   // per-model tokens/cost breakdown
+	lastTick             int64    // mtime of watch.log (0 = unknown)
+	lastErr              string   // recent ERROR line from watch.log, "" if none
+	lastErrTs            int64
+	hotspots             []hotspot   // most-conflicted files, all time
+	spendDaily           []float64   // USD per day, last 14 days, oldest first
+	topRuns              []costRun   // most expensive AI runs
+}
+
+type hotspot struct {
+	file  string
+	count int
+}
+
+type costRun struct {
+	iid, model string
+	cost       float64
+	ts         int64
 }
 
 type tickMsg time.Time
@@ -152,6 +169,8 @@ type model struct {
 	width    int
 	height   int
 	showHelp bool
+	screen   int // 0 = main, 1 = insights, 2 = fleet
+	selF     int // fleet cursor
 }
 
 func main() {
@@ -285,6 +304,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "?":
 			m.showHelp = !m.showHelp
+		case "1":
+			m.screen = 0
+		case "2":
+			m.screen = 1
+		case "3":
+			m.screen = 2
 		case "esc":
 			m.showHelp = false
 			m.showLog = false
@@ -294,6 +319,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab":
 			m.focus = (m.focus + 1) % 4
 		case "up", "k":
+			if m.screen == 2 {
+				if m.selF > 0 {
+					m.selF--
+				}
+				break
+			}
 			switch m.focus {
 			case 1:
 				if m.sel > 0 {
@@ -307,6 +338,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.liveOff += 3
 			}
 		case "down", "j":
+			if m.screen == 2 {
+				if m.selF < len(readInstances())-1 {
+					m.selF++
+				}
+				break
+			}
 			switch m.focus {
 			case 1:
 				if m.sel < len(m.activeRefs())-1 {
@@ -320,6 +357,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.liveOff = max(0, m.liveOff-3)
 			}
 		case "enter", "e":
+			if m.screen == 2 {
+				insts := readInstances()
+				if m.selF >= 0 && m.selF < len(insts) {
+					m.root = insts[m.selF]
+					m.snap = readSnapshot(m.root, m.width)
+					m.screen = 0
+					m.sel, m.selH, m.liveOff = 0, 0, 0
+				}
+				break
+			}
 			if r, ok := m.selected(); ok {
 				if r.kind == "mr" {
 					m.expandedMR[r.mr.iid] = !m.expandedMR[r.mr.iid]
@@ -449,8 +496,13 @@ func outcomeMark(phase string) string {
 
 func (m model) renderRow(it item, idx int, now int64, aw int) string {
 	mark := outcomeMark(it.phase)
+	stale := false
 	if it.active && !terminal(it.phase) {
 		mark = amber.Render(string(spinner[m.frame%len(spinner)]))
+		if p, ok := phases[it.phase]; ok && now-it.ts > int64(4*max(p.avg, 30)) {
+			stale = true
+			mark = red.Render("⏱")
+		}
 	}
 	inPhase := int(now - it.ts)
 	if terminal(it.phase) {
@@ -481,11 +533,15 @@ func (m model) renderRow(it item, idx int, now int64, aw int) string {
 		tag = "  "
 	}
 	_ = pct
+	detail := it.detail
+	if stale {
+		detail = "stalled? no phase progress for " + fmtAge(now-it.ts) + " — check the log (l)"
+	}
 	row := fmt.Sprintf(" %s %s %s %s  %s %3dm%02ds %-5s %s",
 		mark, bold.Render(fmt.Sprintf("!%-4s", it.iid)), dim.Render(when),
 		segBar(it.phase, m.frame),
 		style.Render(fmt.Sprintf("%-10s", it.phase)), el/60, el%60,
-		dim.Render(tag), dim.Render(trunc(it.detail, aw-48)))
+		dim.Render(tag), dim.Render(trunc(detail, aw-48)))
 	if idx == m.sel && m.focus == 1 {
 		row = selRow.Render(row)
 	}
@@ -619,12 +675,21 @@ func (m model) renderBanner() string {
 	}
 	sparks := []string{" ", "·", "✦", "·"}
 	spark := amber.Render(sparks[m.frame%len(sparks)])
-	return " 🔧" + spark + " " + bold.Render(name[:k]) + cur + "\n"
+	// pixel wrench: a corner pixel orbiting the cell — reads as spinning
+	wrench := []string{"▘", "▝", "▗", "▖"}
+	w := amberB.Render(wrench[m.frame%len(wrench)])
+	return " " + w + spark + " " + bold.Render(name[:k]) + cur + "\n\n"
 }
 
 func (m model) View() string {
 	if m.showHelp {
 		return m.helpView()
+	}
+	if m.screen == 1 {
+		return m.insightsView()
+	}
+	if m.screen == 2 {
+		return m.fleetView()
 	}
 	s := m.snap
 	now := time.Now().Unix()
@@ -661,10 +726,23 @@ func (m model) View() string {
 	if bmax == 0 {
 		budgetLine = fmt.Sprintf("%s %s today · %s %s", dim.Render("ai-budget"), s.budget, green.Render("∞ unlimited"), dim.Render("+/-"))
 	}
+	tickLine := dim.Render("tick   never seen")
+	if s.lastTick > 0 {
+		agoS := now - s.lastTick
+		st := green
+		if agoS > 600 {
+			st = red // two+ missed polls — the daemon is probably wedged
+		}
+		tickLine = dim.Render("tick   ") + st.Render(fmtAge(agoS)+" ago")
+	}
 	statusLines := []string{
 		fmt.Sprintf("%s %s · daemon %s", amber.Render(string(orbit[m.frame%len(orbit)])),
 			time.Now().Format("15:04:05"), d),
 		budgetLine,
+		tickLine,
+	}
+	if s.lastErr != "" {
+		statusLines = append(statusLines, red.Render("⚠ "+s.lastErr))
 	}
 	runLines := []string{
 		fmt.Sprintf("today  %s %s %s", green.Render(fmt.Sprintf("%d✓", s.ok)),
@@ -920,7 +998,136 @@ func (m model) View() string {
 	key := func(k, label string) string { return amber.Render(k) + dim.Render(" "+label) }
 	sep := dim.Render(" · ")
 	b.WriteString(" " + key("tab", "focus") + sep + key("↑↓", "move") + sep + key("enter", "details") + sep +
-		key("o", "open") + sep + key("a", "approve") + sep + key("?", "help") + sep + key("q", "quit"))
+		key("o", "open") + sep + key("a", "approve") + sep + key("2", "insights") + sep + key("3", "fleet") + sep +
+		key("?", "help") + sep + key("q", "quit"))
+	return b.String()
+}
+
+// readInstances lists installed merge-medic roots from the registry.
+func readInstances() []string {
+	home, _ := os.UserHomeDir()
+	data, err := os.ReadFile(filepath.Join(home, ".config", "merge-medic", "instances"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, ln := range nonEmpty(strings.Split(string(data), "\n")) {
+		if st, err := os.Stat(ln); err == nil && st.IsDir() {
+			out = append(out, ln)
+		}
+	}
+	return out
+}
+
+// insightsView — screen 2: conflict hotspots + spend analytics.
+func (m model) insightsView() string {
+	s := m.snap
+	var b strings.Builder
+	b.WriteString(m.renderBanner())
+	w := m.width
+
+	var hs []string
+	if len(s.hotspots) == 0 {
+		hs = append(hs, dim.Render(" no archived AI runs yet"))
+	}
+	maxC := 1
+	for _, h := range s.hotspots {
+		if h.count > maxC {
+			maxC = h.count
+		}
+	}
+	for _, h := range s.hotspots {
+		barW := h.count * 20 / maxC
+		hs = append(hs, fmt.Sprintf(" %s %s %s",
+			amber.Render(fmt.Sprintf("%3d×", h.count)),
+			yellow.Render(strings.Repeat("▪", barW)),
+			dim.Render(trunc(h.file, w-32))))
+	}
+	b.WriteString(titledBox(w, "HOTSPOTS", "most-conflicted files, all runs", strings.Join(hs, "\n"), 0, false) + "\n")
+
+	maxS := 0.01
+	for _, v := range s.spendDaily {
+		if v > maxS {
+			maxS = v
+		}
+	}
+	var spark strings.Builder
+	for _, v := range s.spendDaily {
+		idx := int(v / maxS * float64(len(sparkChars)-1))
+		spark.WriteRune(sparkChars[idx])
+	}
+	sp := []string{
+		fmt.Sprintf(" %s %s  %s", dim.Render("14d"), green.Render(spark.String()),
+			dim.Render(fmt.Sprintf("today ≈$%.2f · all $%.2f", s.spendToday, s.spend))),
+		"",
+		dim.Render(" most expensive runs:"),
+	}
+	if len(s.topRuns) == 0 {
+		sp = append(sp, dim.Render("  none yet"))
+	}
+	for _, r := range s.topRuns {
+		short := r.model
+		if i := strings.Index(short, "claude-"); i >= 0 {
+			short = short[i+7:]
+		}
+		sp = append(sp, fmt.Sprintf("  %s %s %s %s",
+			amber.Render(fmt.Sprintf("$%.2f", r.cost)),
+			bold.Render(fmt.Sprintf("!%-5s", r.iid)),
+			dim.Render(fmt.Sprintf("%-14s", trunc(short, 14))),
+			dim.Render(time.Unix(r.ts, 0).Format("02.01 15:04"))))
+	}
+	b.WriteString(titledBox(w, "SPEND", "$ per day + top runs", strings.Join(sp, "\n"), 0, false) + "\n")
+	b.WriteString(" " + amber.Render("1") + dim.Render(" main · ") + amber.Render("3") + dim.Render(" fleet · ") + amber.Render("q") + dim.Render(" quit"))
+	return b.String()
+}
+
+// fleetView — screen 3: every installed instance at a glance.
+func (m model) fleetView() string {
+	var b strings.Builder
+	b.WriteString(m.renderBanner())
+	insts := readInstances()
+	var rows []string
+	if len(insts) == 0 {
+		rows = append(rows, dim.Render(" no registered instances (~/.config/merge-medic/instances)"))
+	}
+	today := time.Now().Format("2006-01-02")
+	for i, root := range insts {
+		name := strings.TrimPrefix(filepath.Base(root), ".")
+		pp := readConfigVal(root, "PROJECT_PATH", "?")
+		pv := readConfigVal(root, "PROVIDER", "gitlab")
+		spent := "0"
+		if bts, err := os.ReadFile(filepath.Join(root, "state", "budget-"+today)); err == nil {
+			spent = strings.TrimSpace(string(bts))
+		}
+		conf := 0
+		mrFiles, _ := filepath.Glob(filepath.Join(root, "state", "mr-*"))
+		for _, f := range mrFiles {
+			if data, err := os.ReadFile(f); err == nil && strings.HasPrefix(string(data), "conflict") {
+				conf++
+			}
+		}
+		d := red.Render("off")
+		if daemonLoaded(root) {
+			d = green.Render("on")
+		}
+		cur := "  "
+		if root == m.root {
+			cur = amber.Render("▸ ")
+		}
+		st := ""
+		if conf > 0 {
+			st = red.Render(fmt.Sprintf(" %d✗", conf))
+		}
+		row := fmt.Sprintf(" %s%s %s %s · daemon %s · ai %s today%s", cur,
+			bold.Render(fmt.Sprintf("%-16s", name)), dim.Render(fmt.Sprintf("%-7s", pv)),
+			trunc(pp, 40), d, spent, st)
+		if i == m.selF {
+			row = selRow.Render(row)
+		}
+		rows = append(rows, row)
+	}
+	b.WriteString(titledBox(m.width, "FLEET", fmt.Sprintf("%d instances", len(insts)), strings.Join(rows, "\n"), 0, true) + "\n")
+	b.WriteString(" " + amber.Render("↑↓") + dim.Render(" move · ") + amber.Render("enter") + dim.Render(" switch dashboard to instance · ") + amber.Render("1") + dim.Render(" main · ") + amber.Render("2") + dim.Render(" insights · ") + amber.Render("q") + dim.Render(" quit"))
 	return b.String()
 }
 
@@ -931,6 +1138,7 @@ func (m model) helpView() string {
 		{"o", "open the selected MR/PR in the browser"},
 		{"tab", "cycle focus: ACTIVE → HISTORY → LIVE (j/k scrolls the log)"},
 		{"+ / -", "raise / lower the daily AI budget when STATUS is focused (0 = unlimited)"},
+		{"1 / 2 / 3", "screens: main dashboard / insights (hotspots, spend) / fleet (instances)"},
 		{"l", "toggle AI/fixer log panel for the selected MR"},
 		{"a", "approve the selected PLANNED plan (semi-auto branches)"},
 		{"r", "force a watcher tick now"},
@@ -1323,6 +1531,26 @@ func readSnapshot(root string, width int) snapshot {
 
 	s.feed = buildFeed(root, 4000)
 	s.spendToday, s.spend, s.modelLine = readTokens(root, day0)
+	s.spendDaily = make([]float64, 14)
+	if data, err := os.ReadFile(filepath.Join(root, "state", "tokens.log")); err == nil {
+		for _, ln := range nonEmpty(strings.Split(string(data), "\n")) {
+			p := strings.Split(ln, "|")
+			if len(p) < 7 {
+				continue
+			}
+			ts, _ := strconv.ParseInt(p[0], 10, 64)
+			cost, _ := strconv.ParseFloat(p[6], 64)
+			age := int((day0 + 86400 - ts) / 86400)
+			if age >= 0 && age < 14 {
+				s.spendDaily[13-age] += cost
+			}
+			s.topRuns = append(s.topRuns, costRun{iid: p[1], model: p[2], cost: cost, ts: ts})
+		}
+		sort.Slice(s.topRuns, func(i, j int) bool { return s.topRuns[i].cost > s.topRuns[j].cost })
+		if len(s.topRuns) > 5 {
+			s.topRuns = s.topRuns[:5]
+		}
+	}
 
 	// DONE per day for the last 14 days (activity sparkline)
 	s.daily = make([]int, 14)
@@ -1338,6 +1566,60 @@ func readSnapshot(root string, width int) snapshot {
 				s.daily[13-age]++
 			}
 		}
+	}
+
+	// watcher health: heartbeat written by every tick (watch.log only gets
+	// lines when something happens, so its mtime is not a liveness signal)
+	if b, err := os.ReadFile(filepath.Join(root, "state", ".lastpoll")); err == nil {
+		s.lastTick, _ = strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	} else if st, err := os.Stat(filepath.Join(root, "logs", "watch.log")); err == nil {
+		s.lastTick = st.ModTime().Unix() // pre-heartbeat fallback
+	}
+	for _, ln := range tailBytes(filepath.Join(root, "logs", "watch.log"), 8*1024) {
+		if i := strings.Index(ln, "ERROR:"); i >= 0 && len(ln) > 21 {
+			if t, err := time.ParseInLocation("2006-01-02 15:04:05", ln[:19], time.Local); err == nil {
+				s.lastErr = strings.TrimSpace(ln[i+6:])
+				s.lastErrTs = t.Unix()
+			}
+		}
+	}
+	if s.lastErrTs > 0 && now.Unix()-s.lastErrTs > 1800 {
+		s.lastErr = "" // old news
+	}
+
+	// hotspots: conflicted files across all archived runs
+	fileCount := map[string]int{}
+	if runFiles, err := filepath.Glob(filepath.Join(root, "state", "runs", "*.log")); err == nil {
+		for _, rf := range runFiles {
+			data, err := os.ReadFile(rf)
+			if err != nil {
+				continue
+			}
+			for _, ln := range strings.Split(string(data), "\n") {
+				parts := strings.SplitN(ln, "|", 3)
+				if len(parts) < 3 || (parts[1] != "AI_RESOLVE" && parts[1] != "PLAN") {
+					continue
+				}
+				d := parts[2]
+				if i := strings.Index(d, "file(s): "); i >= 0 {
+					for _, f := range strings.Fields(d[i+9:]) {
+						fileCount[f]++
+					}
+				}
+			}
+		}
+	}
+	for f, c := range fileCount {
+		s.hotspots = append(s.hotspots, hotspot{f, c})
+	}
+	sort.Slice(s.hotspots, func(i, j int) bool {
+		if s.hotspots[i].count != s.hotspots[j].count {
+			return s.hotspots[i].count > s.hotspots[j].count
+		}
+		return s.hotspots[i].file < s.hotspots[j].file
+	})
+	if len(s.hotspots) > 10 {
+		s.hotspots = s.hotspots[:10]
 	}
 
 	// brewing conflicts between open MRs (state/radar: a|b|srcA|srcB)

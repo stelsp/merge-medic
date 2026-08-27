@@ -49,6 +49,8 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 fi
 echo $$ > "$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
+# heartbeat for the dashboard's health line (quiet ticks write no logs)
+date +%s > "$STATE/.lastpoll"
 
 # ── daily AI budget (guard; fixers do the real accounting) ────────────────────
 today="$(date '+%Y-%m-%d')"
