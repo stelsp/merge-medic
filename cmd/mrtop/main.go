@@ -23,6 +23,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Night-shift ops console: sharp single borders, one amber accent for
+// identity/keys/titles, colors otherwise reserved for state (green/red/
+// yellow), terminal-transparent background.
 var (
 	bold    = lipgloss.NewStyle().Bold(true)
 	dim     = lipgloss.NewStyle().Faint(true)
@@ -30,13 +33,39 @@ var (
 	red     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	yellow  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	blue    = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
+	amber   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	amberB  = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	borderC = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	selRow  = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	// body of a panel: sharp border, no top edge — the top line is drawn by
+	// titledBox with the title embedded in the border itself
 	section = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(lipgloss.NormalBorder(), false, true, true, true).
 		BorderForeground(lipgloss.Color("238")).
 		Padding(0, 1)
 	sectionTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 )
+
+// titledBox renders a panel of total width w with the title (and an optional
+// dim meta like a count) embedded in the top border: ┌─ ACTIVE ─ 12 ──────┐
+func titledBox(w int, title, meta, body string, height int) string {
+	st := section.Width(w - 2)
+	if height > 0 {
+		st = st.Height(height)
+	}
+	inner := st.Render(body)
+	label := amberB.Render(" " + title + " ")
+	if meta != "" {
+		label += dim.Render(meta+" ")
+	}
+	used := 2 + lipgloss.Width(label) // "┌─" + label
+	rest := w - used - 1
+	if rest < 0 {
+		rest = 0
+	}
+	top := borderC.Render("┌─") + label + borderC.Render(strings.Repeat("─", rest)+"┐")
+	return top + "\n" + inner
+}
 
 var spinner = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 
@@ -299,7 +328,7 @@ func outcomeMark(phase string) string {
 func (m model) renderRow(it item, idx int, now int64, aw int) string {
 	mark := outcomeMark(it.phase)
 	if it.active && !terminal(it.phase) {
-		mark = blue.Render(string(spinner[m.frame%len(spinner)]))
+		mark = amber.Render(string(spinner[m.frame%len(spinner)]))
 	}
 	inPhase := int(now - it.ts)
 	if terminal(it.phase) {
@@ -491,10 +520,8 @@ func (m model) View() string {
 		b.WriteString(m.renderBanner())
 	}
 
-	// box renders a section whose TOTAL printed width (border included) is w —
-	// lipgloss adds the border on top of Width, hence the -2.
 	box := func(w int, title, body string) string {
-		return section.Width(w - 2).Render(sectionTitle.Render(title) + "\n" + body)
+		return titledBox(w, title, "", body, 0)
 	}
 
 	// ── layout: left column (status strip, ACTIVE, HISTORY) + LIVE at right ──
@@ -515,7 +542,7 @@ func (m model) View() string {
 		budgetLine = fmt.Sprintf("%s %s today · %s", dim.Render("ai-budget"), s.budget, green.Render("∞ unlimited"))
 	}
 	statusLines := []string{
-		fmt.Sprintf("%s %s · daemon %s", dim.Render(string(orbit[m.frame%len(orbit)])),
+		fmt.Sprintf("%s %s · daemon %s", amber.Render(string(orbit[m.frame%len(orbit)])),
 			time.Now().Format("15:04:05"), d),
 		budgetLine,
 	}
@@ -539,9 +566,9 @@ func (m model) View() string {
 		w1 := lw * 2 / 5
 		w2 := (lw - w1) / 2
 		w3 := lw - w1 - w2
-		h := max(len(statusLines), max(len(runLines), len(spendLines))) + 1
+		h := max(len(statusLines), max(len(runLines), len(spendLines)))
 		boxH := func(w int, title, body string) string {
-			return section.Width(w - 2).Height(h).Render(sectionTitle.Render(title) + "\n" + body)
+			return titledBox(w, title, "", body, h)
 		}
 		lb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top,
 			boxH(w1, "STATUS", strings.Join(statusLines, "\n")),
@@ -646,8 +673,8 @@ func (m model) View() string {
 		hist = append(hist, m.renderHistRow(it, idx, hw))
 		idx++
 	}
-	lb.WriteString(box(lw, "ACTIVE", strings.Join(act, "\n")) + "\n")
-	lb.WriteString(box(lw, "HISTORY", strings.Join(hist, "\n")) + "\n")
+	lb.WriteString(titledBox(lw, "ACTIVE", fmt.Sprintf("%d MRs", len(s.mrs)), strings.Join(act, "\n"), 0) + "\n")
+	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), 0) + "\n")
 
 	if m.showLog {
 		lb.WriteString(bold.Render("log ") + dim.Render(m.logName) + "\n")
@@ -675,7 +702,7 @@ func (m model) View() string {
 			}
 			body = strings.Join(wl, "\n")
 		}
-		liveBox := section.Width(liveW - 2).Height(total - 2).Render(sectionTitle.Render("LIVE") + "\n" + body)
+		liveBox := titledBox(liveW, "LIVE", "▼ follow", body, total-2)
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, liveBox) + "\n")
 	} else {
 		b.WriteString(lb.String())
@@ -696,7 +723,10 @@ func (m model) View() string {
 		}
 	}
 
-	b.WriteString(dim.Render("↑↓ move · enter details · o open · a approve · ? help · q quit"))
+	key := func(k, label string) string { return amber.Render(k) + dim.Render(" "+label) }
+	sep := dim.Render(" · ")
+	b.WriteString(" " + key("↑↓", "move") + sep + key("enter", "details") + sep +
+		key("o", "open") + sep + key("a", "approve") + sep + key("?", "help") + sep + key("q", "quit"))
 	return b.String()
 }
 
