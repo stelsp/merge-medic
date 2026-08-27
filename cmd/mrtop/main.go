@@ -22,7 +22,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/truncate"
-	"regexp"
 )
 
 // Night-shift ops console: sharp single borders, one amber accent for
@@ -38,7 +37,6 @@ var (
 	amber   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	amberB  = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
 	borderC = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	selRow  = lipgloss.NewStyle().Background(lipgloss.Color("214")).Foreground(lipgloss.Color("235"))
 	// body of a panel: sharp border, no top edge — the top line is drawn by
 	// titledBox with the title embedded in the border itself
 	section = lipgloss.NewStyle().
@@ -558,20 +556,13 @@ func segBar(ph string, frame int) string {
 
 // selMark highlights the selected row: amber bar + a full-width amber fill
 // (same color as the focused border), padded to the panel's content width.
-var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
-
-func selMark(row string, w int) string {
-	// inner color spans end with an SGR reset that also kills the background,
-	// so the fill used to stop at the first styled cell — strip ALL codes and
-	// paint the whole line dark-on-amber
-	row = ansiRe.ReplaceAllString(row, "")
+// selMark marks the cursor row with an amber bar at the line start — no
+// background fill, the row keeps its own colors.
+func selMark(row string, _ int) string {
 	if strings.HasPrefix(row, " ") {
 		row = row[1:]
 	}
-	if pad := w - 1 - lipgloss.Width(row); pad > 0 {
-		row += strings.Repeat(" ", pad)
-	}
-	return amberB.Render("▎") + selRow.Render(row)
+	return amberB.Render("▎") + row
 }
 
 func outcomeMark(phase string) string {
