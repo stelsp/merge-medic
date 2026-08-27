@@ -227,6 +227,8 @@ case "$cmd" in
     # merged real-time stream: watcher lines + every fixer phase event.
     # Meant to run forever in its own terminal window next to `mrwatch top`.
     touch "$ROOT/logs/watch.log" "$ROOT/logs/events.log"
+    cols="$(tput cols 2>/dev/null || echo 120)"
+    maxd=$(( cols - 26 )); [ "$maxd" -lt 20 ] && maxd=20
     echo "${B}merge-medic — live event stream${N} ${DIM}(Ctrl-C to quit)${N}"
     src=""
     tail -n 30 -F "$ROOT/logs/watch.log" "$ROOT/logs/events.log" 2>/dev/null \
@@ -247,10 +249,19 @@ case "$cmd" in
             *) c="";;
           esac
           t="$(date -r "$ets" '+%H:%M:%S' 2>/dev/null || date -d "@$ets" '+%H:%M:%S' 2>/dev/null || echo '??:??:??')"
-          printf '%s %s %s%-11s%s %s\n' "${DIM}$t${N}" "${B}!$eiid${N}" "$c" "$ephase" "$N" "${DIM}$edetail${N}"
+          printf '%s %s %s%-11s%s %s\n' "${DIM}$t${N}" "${B}!$eiid${N}" "$c" "$ephase" "$N" "${DIM}${edetail:0:$maxd}${N}"
         else
-          # watch.log lines already carry a timestamp — show date part dimmed
-          printf '%s\n' "${DIM}${line}${N}"
+          # watch.log line: "YYYY-mm-dd HH:MM:SS  msg" — keep the time, drop
+          # the date, colorize by class, truncate to the terminal width
+          t="${line:11:8}"; msg="${line:21}"
+          if [ -z "$msg" ]; then t=""; msg="$line"; fi
+          case "$line" in
+            *ERROR*)                 c="$RED" ;;
+            *CONFLICT*)              c="$YLW" ;;
+            *"fixer ->"*)            c="$GRN" ;;
+            *) c="" ;;
+          esac
+          printf '%s %s%s%s\n' "${DIM}${t:-        }${N}" "$c" "${msg:0:$maxd}" "$N"
         fi
       done
     ;;

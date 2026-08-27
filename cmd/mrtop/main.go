@@ -258,6 +258,45 @@ func (m model) renderRow(it item, idx int, now int64) string {
 	return row
 }
 
+// renderHistRow is a compact finished-run line: no progress bar (a static
+// 100% slab is just noise), outcome mark + phase + duration + mode + detail.
+func (m model) renderHistRow(it item, idx int) string {
+	style := dim
+	switch it.phase {
+	case "DONE":
+		style = green
+	case "FAIL":
+		style = red
+	case "ESCALATED", "PLANNED":
+		style = yellow
+	}
+	dur := "    —"
+	if it.ts > it.t0 {
+		d := it.ts - it.t0
+		dur = fmt.Sprintf("%2dm%02ds", d/60, d%60)
+	}
+	tag := it.mode
+	if tag == "" || tag == "none" {
+		tag = "  "
+	}
+	detail := it.detail
+	if detail == "" {
+		detail = "(no run archive)"
+	}
+	row := fmt.Sprintf(" %s %s %s  %s %s  %-5s %s",
+		outcomeMark(it.phase), bold.Render(fmt.Sprintf("!%-4s", it.iid)),
+		dim.Render(time.Unix(it.t0, 0).Format("02.01 15:04")),
+		style.Render(fmt.Sprintf("%-10s", it.phase)), dur,
+		dim.Render(tag), dim.Render(trunc(detail, m.width-46)))
+	if idx == m.sel {
+		row = selRow.Render(row)
+	}
+	if m.expanded[it.key()] {
+		row += "\n" + m.renderTimeline(it)
+	}
+	return row
+}
+
 // renderTimeline shows the per-phase history of one run.
 func (m model) renderTimeline(it item) string {
 	src := it.runFile
@@ -327,7 +366,7 @@ func (m model) View() string {
 		hist = append(hist, dim.Render(" no runs yet"))
 	}
 	for _, it := range s.histRows {
-		hist = append(hist, m.renderRow(it, idx, now))
+		hist = append(hist, m.renderHistRow(it, idx))
 		idx++
 	}
 	b.WriteString(section.Width(m.width - 2).Render(
