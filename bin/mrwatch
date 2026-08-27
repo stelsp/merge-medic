@@ -250,7 +250,19 @@ case "$cmd" in
     BRIEF="$ROOT/state/esc-$iid.md"
     ANS="$ROOT/state/answers-$iid.md"
     if [ ! -f "$BRIEF" ]; then
-      echo "no escalation brief for $iid (state/esc-$iid.md missing)"; exit 1
+      # path-pattern escalations carry no AI brief — synthesize one from the
+      # recorded escalation reason so the chat works for every escalation
+      reason="$( (grep '|ESCALATED|' "$ROOT/state/progress-$iid.log" 2>/dev/null || true) | tail -1 | cut -d'|' -f3)"
+      [ -z "$reason" ] && reason="escalated — reason not recorded"
+      {
+        printf '## Blocked
+%s
+
+' "$reason"
+        printf '## Questions
+1. How should this conflict be resolved? Be specific per file.
+'
+      } > "$BRIEF"
     fi
     echo "${B}── the bot is blocked on $iid ─────────────────────────${N}"
     cat "$BRIEF"
