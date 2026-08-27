@@ -11,29 +11,37 @@ OS="$(uname -s)"
 echo "merge-medic installer"
 echo "  root: $ROOT  os: $OS"
 
-# ── dependencies ──────────────────────────────────────────────────────────────
+# ── config (seeded first — the dependency check reads PROVIDER from it) ───────
+if [ ! -f "$ROOT/config.env" ]; then
+  cp "$ROOT/config.example.env" "$ROOT/config.env"
+  echo "  created config.env from example — EDIT IT before going live:"
+  echo "    $ROOT/config.env"
+  echo "  (it starts in DRY_RUN=1, so enabling the scheduler now is safe)"
+fi
+
+# ── dependencies (forge CLI depends on PROVIDER: glab for gitlab, gh for github)
+PROVIDER="$(sed -n 's/^PROVIDER=["'\'']\{0,1\}\([a-z]*\).*/\1/p' "$ROOT/config.env" | head -1)"
+PROVIDER="${PROVIDER:-gitlab}"
+FORGE_CLI="glab"; [ "$PROVIDER" = "github" ] && FORGE_CLI="gh"
+echo "  provider: $PROVIDER (forge CLI: $FORGE_CLI)"
+
 missing=0
-for dep in glab jq git claude; do
+for dep in "$FORGE_CLI" jq git claude; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     echo "  MISSING: $dep"; missing=1
   fi
 done
-[ "$missing" = "1" ] && { echo "install the missing tools first (glab: https://gitlab.com/gitlab-org/cli; claude: https://code.claude.com)"; exit 1; }
-glab auth status >/dev/null 2>&1 || echo "  WARN: glab is not authenticated — run: glab auth login"
+[ "$missing" = "1" ] && { echo "install the missing tools first (glab: https://gitlab.com/gitlab-org/cli; gh: https://cli.github.com; claude: https://code.claude.com)"; exit 1; }
+if ! "$FORGE_CLI" auth status >/dev/null 2>&1; then
+  echo "  WARN: $FORGE_CLI is not authenticated — run: $FORGE_CLI auth login"
+  echo "        (the watcher cannot list MRs/PRs until you do)"
+fi
 IS_WSL=0
 grep -qi microsoft /proc/version 2>/dev/null && IS_WSL=1
 if [ "$IS_WSL" = "1" ]; then
   echo "  detected WSL — notifications bridge to Windows toasts via powershell.exe"
 elif [ "$OS" = "Linux" ] && ! command -v notify-send >/dev/null 2>&1; then
   echo "  NOTE: notify-send not found — desktop notifications will be silent"
-fi
-
-# ── config ────────────────────────────────────────────────────────────────────
-if [ ! -f "$ROOT/config.env" ]; then
-  cp "$ROOT/config.example.env" "$ROOT/config.env"
-  echo "  created config.env from example — EDIT IT before going live:"
-  echo "    $ROOT/config.env"
-  echo "  (it starts in DRY_RUN=1, so enabling the scheduler now is safe)"
 fi
 
 chmod +x "$ROOT/watch.sh" "$ROOT/fix-mr.sh" "$ROOT/bin/mrwatch"
