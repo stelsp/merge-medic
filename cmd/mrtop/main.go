@@ -201,6 +201,11 @@ func main() {
 		fmt.Println(m.View())
 		return
 	}
+	// with several instances installed, boot into the fleet screen — pick
+	// the project first, exactly like the old launcher but inside the TUI
+	if len(readInstances()) > 1 {
+		m.screen = 2
+	}
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -526,7 +531,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "c":
 			if r, ok := m.selected(); ok {
 				iid := r.iid()
+				// any escalated row chats — mrwatch chat synthesizes a brief
+				// for path-pattern escalations that have none
+				esc := r.kind == "mr"
+				if !esc {
+					esc = r.it.phase == "ESCALATED"
+				}
 				if _, err := os.Stat(filepath.Join(m.root, "state", "esc-"+iid+".md")); err == nil {
+					esc = true
+				}
+				if esc {
 					mrw := filepath.Join(m.root, "bin", "mrwatch")
 					if runtime.GOOS == "darwin" {
 						script := fmt.Sprintf("tell application \"Terminal\" to do script \"bash %s chat %s\"", mrw, iid)
