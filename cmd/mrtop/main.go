@@ -79,7 +79,7 @@ type item struct {
 
 func (it item) key() string { return it.iid + "@" + strconv.FormatInt(it.t0, 10) }
 
-type mrState struct{ iid, status, src, tgt, title string }
+type mrState struct{ iid, status, src, tgt, ci, title string }
 
 type snapshot struct {
 	activeRows, histRows []item
@@ -482,10 +482,10 @@ func (m model) View() string {
 					gear = dim.Render("d ")
 				}
 			}
-			act = append(act, fmt.Sprintf(" %s %s %s%s %s", ic,
+			act = append(act, fmt.Sprintf(" %s %s %s %s%s %s", ic, ciDot(mr.ci),
 				bold.Render(fmt.Sprintf("!%-4s", mr.iid)), gear,
 				dim.Render(fmt.Sprintf("%-*s", bcol, trunc(refs[i], bcol))),
-				tstyle.Render(trunc(title, aw-(13+bcol)))))
+				tstyle.Render(trunc(title, aw-(15+bcol)))))
 		}
 	}
 	if len(act) == 0 {
@@ -703,6 +703,26 @@ func readTokens(root string, day0 int64) (today, total float64, modelLine string
 	return today, total, strings.Join(parts, " · ")
 }
 
+// known CI states (gitlab head_pipeline.status + our github rollup values)
+var ciKnown = map[string]bool{
+	"success": true, "failed": true, "running": true, "pending": true,
+	"canceled": true, "skipped": true, "manual": true, "created": true,
+	"none": true, "preparing": true, "waiting_for_resource": true, "scheduled": true,
+}
+
+// ciDot renders one colored pipeline-status dot for an open MR.
+func ciDot(ci string) string {
+	switch ci {
+	case "success":
+		return green.Render("●")
+	case "failed", "canceled":
+		return red.Render("●")
+	case "", "none", "skipped", "manual":
+		return dim.Render("·")
+	}
+	return yellow.Render("●")
+}
+
 var sparkChars = []rune("▁▂▃▄▅▆▇█")
 
 func sparkline(vals []int) string {
@@ -905,8 +925,15 @@ func readSnapshot(root string, width int) snapshot {
 		if len(fields) > 3 {
 			mr.src, mr.tgt = fields[2], fields[3]
 		}
+		// field 5 is the CI status when it matches a known value (older state
+		// files put the title there — they age out within the 15min TTL)
 		if len(fields) > 4 {
-			mr.title = strings.Join(fields[4:], " ")
+			rest := fields[4:]
+			if ciKnown[rest[0]] {
+				mr.ci = rest[0]
+				rest = rest[1:]
+			}
+			mr.title = strings.Join(rest, " ")
 		}
 		s.mrs = append(s.mrs, mr)
 	}
