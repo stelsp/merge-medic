@@ -47,7 +47,14 @@ fail() {
 escalate() {
   ev ESCALATED "$1"; ledger ESCALATED
   notify "${SIGIL}$IID: needs human" "$1"
-  post_note "merge-medic: conflict escalated to a human — $1"
+  post_note "## 🩹 merge-medic — escalated to a human
+
+**MR:** \`$SRC\` → \`$TGT\` (${SIGIL}$IID)
+
+> [!WARNING]
+> $1
+
+The bot will not touch this conflict. Resolve it manually, or adjust \`policy.md\` / \`ESCALATE_PATTERNS\` if the bot should have handled it."
   cleanup_wt
   exit 2
 }
@@ -76,11 +83,11 @@ collect_feedback() { # $1 = plan file; its mtime is the cutoff
   cutoff="$(stat -f%m "$1" 2>/dev/null || stat -c%Y "$1" 2>/dev/null || echo 0)"
   if [ "${PROVIDER:-gitlab}" = "github" ]; then
     gh pr view "$IID" --repo "$PROJECT_PATH" --json comments 2>/dev/null \
-      | jq -r --argjson t "$cutoff" '[.comments[] | select(.body | startswith("merge-medic") | not) | select((.createdAt | fromdateiso8601) > $t) | "- " + .body] | join("\n")' 2>/dev/null || true
+      | jq -r --argjson t "$cutoff" '[.comments[] | select(.body | test("^(## .? ?merge-medic|merge-medic)") | not) | select((.createdAt | fromdateiso8601) > $t) | "- " + .body] | join("\n")' 2>/dev/null || true
   else
     ( cd "$WT" 2>/dev/null || cd "$WATCH_REPO"
       GITLAB_HOST="${GITLAB_HOST:-}" glab api "projects/:fullpath/merge_requests/$IID/notes?order_by=created_at&sort=desc&per_page=20" 2>/dev/null ) \
-      | jq -r --argjson t "$cutoff" '[.[] | select(.system==false) | select(.body | startswith("merge-medic") | not) | select((.created_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > $t) | "- " + .body] | reverse | join("\n")' 2>/dev/null || true
+      | jq -r --argjson t "$cutoff" '[.[] | select(.system==false) | select(.body | test("^(## .? ?merge-medic|merge-medic)") | not) | select((.created_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > $t) | "- " + .body] | reverse | join("\n")' 2>/dev/null || true
   fi
 }
 
@@ -119,7 +126,14 @@ if git -c merge.conflictStyle=zdiff3 merge --no-ff --no-edit \
   if [ "$MODE" = "plan" ]; then
     ev PLANNED "clean merge — approve (a) to push"
     ledger PLANNED
-    post_note "merge-medic plan for ${SIGIL}$IID: origin/$TGT merges cleanly — no conflicts. Approve in the dashboard (hotkey a) and the bot will redo the merge, run the gates and push. Comment corrections here before approving; the approved run reads them."
+    post_note "## 🩹 merge-medic — plan (approval required)
+
+**MR:** \`$SRC\` → \`$TGT\` (${SIGIL}$IID) · **Mode:** clean merge, no conflicts
+
+\`origin/$TGT\` merges cleanly. On approve the bot redoes the merge, runs the gates and pushes.
+
+> [!NOTE]
+> **Approve:** press \`a\` in the dashboard. **Corrections:** comment below before approving — the approved run reads them."
     notify "${SIGIL}$IID: plan ready" "clean merge — approve in dashboard (a)"
     cleanup_wt
     exit 0
@@ -190,7 +204,7 @@ ${src_hist:-<no commits found>}
 What the target branch ($TGT) did to these files:
 ${tgt_hist:-<no commits found>}
 
-For each file: what each side changed, what you would keep and why, and any risk worth a human's attention. Be specific enough that a reviewer can approve or correct it in a comment. End with an overall risk assessment.$policy" \
+Write GitHub-flavored markdown, no preamble: a '### <file path>' heading per file with bullets '**source changed:** …', '**target changed:** …', '**proposed resolution:** …', '**risk:** …'. Be specific enough that a reviewer can approve or correct it in a comment. End with an '#### Overall risk' section.$policy" \
       --model "${CLAUDE_MODEL:-opus}" \
       --permission-mode acceptEdits \
       --allowedTools "Read Grep Glob Bash(git:*)" \
@@ -203,7 +217,13 @@ For each file: what each side changed, what you would keep and why, and any risk
     [ "$prc" != "0" ] && fail "plan agent exited with code $prc"
     ev PLANNED "awaiting approve (a) — plan posted to ${SIGIL}$IID"
     ledger PLANNED
-    post_note "merge-medic resolution plan for ${SIGIL}$IID. Approve in the dashboard (hotkey a) to let the bot execute it; comment corrections here first — the approved run reads them and they override the plan.
+    post_note "## 🩹 merge-medic — resolution plan (approval required)
+
+**MR:** \`$SRC\` → \`$TGT\` (${SIGIL}$IID) · **Conflicts:** $n file(s)
+
+> [!NOTE]
+> **Approve:** press \`a\` in the dashboard — the bot executes this plan.
+> **Corrections:** comment below first; the approved run reads them and they **override** the plan.
 
 $(cat "$PLANFILE")"
     notify "${SIGIL}$IID: plan ready" "review & approve in dashboard (a)"
@@ -245,8 +265,9 @@ Rules:
   neither the defaults nor the project rules decide it safely — do NOT guess:
   write a one-line reason into a file named $ESCFILE in the repo root and stop.
 - After editing: git add each resolved file. Do NOT commit, do NOT push.
-- Write a short summary (per file: what each side wanted, what you kept and
-  why) into a file named $SUMFILE in the repo root.$approved_ctx$policy" \
+- Write a summary into a file named $SUMFILE in the repo root, as
+  GitHub-flavored markdown: a '### <file path>' heading per file with bullets
+  '**source:** …', '**target:** …', '**kept:** …'. No preamble.$approved_ctx$policy" \
     --model "${CLAUDE_MODEL:-opus}" \
     --permission-mode acceptEdits \
     --allowedTools "Read Edit Write Glob Grep Bash(git:*)" \
@@ -303,10 +324,28 @@ ev DONE "merged origin/$TGT, gates green, pushed"
 ledger DONE
 notify "${SIGIL}$IID fixed ✓" "$SRC: merge $TGT + gates + push"
 if [ "$ai_ran" = "1" ] && [ -n "$summary" ]; then
-  post_note "merge-medic resolved conflicts with origin/$TGT automatically.
+  g_tests="—"; [ -n "${TEST_CMD_TEMPLATE:-}" ] && g_tests="✅ \`$(printf '%s' "$TEST_CMD_TEMPLATE" | cut -c1-60)\`"
+  g_regr="—"
+  if [ -n "${REGRESSION_CMD:-}" ] && { [ "$when" = "always" ] || [ "$when" = "ai" ]; }; then
+    g_regr="✅ \`$(printf '%s' "$REGRESSION_CMD" | cut -c1-60)\`"
+  fi
+  approved_tag=""; [ "$MODE" = "fix-approved" ] && approved_tag=" · human-approved plan"
+  post_note "## 🩹 merge-medic — conflicts resolved automatically
+
+**MR:** \`$SRC\` → \`$TGT\` (${SIGIL}$IID) · **Mode:** AI resolution$approved_tag
+
+### What was resolved
 
 $summary
 
-Gates: verify$([ -n "${TEST_CMD_TEMPLATE:-}" ] && printf ' + focused tests')$([ -n "${REGRESSION_CMD:-}" ] && printf ' + regression') green before push."
+### Gates (all green before push)
+
+| Gate | Result |
+|---|---|
+| verify | ✅ \`$(printf '%s' "${VERIFY_CMD:-—}" | cut -c1-60)\` |
+| focused tests | $g_tests |
+| regression | $g_regr |
+
+<sub>The merge commit is on the branch — review as usual; nothing was merged into \`$TGT\`.</sub>"
 fi
 cleanup_wt
