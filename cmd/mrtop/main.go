@@ -41,6 +41,7 @@ var phases = map[string]phaseInfo{
 	"MERGE":       {25, 45, 10},
 	"MERGE_CLEAN": {45, 70, 2},
 	"AI_RESOLVE":  {45, 70, 90},
+	"PLAN":        {45, 70, 60},
 	"VERIFY":      {70, 80, 150},
 	"TESTS":       {80, 88, 60},
 	"REGRESSION":  {88, 95, 180},
@@ -48,10 +49,11 @@ var phases = map[string]phaseInfo{
 	"DONE":        {100, 100, 1},
 	"FAIL":        {100, 100, 1},
 	"ESCALATED":   {100, 100, 1},
+	"PLANNED":     {100, 100, 1},
 }
 
 func terminal(phase string) bool {
-	return phase == "DONE" || phase == "FAIL" || phase == "ESCALATED"
+	return phase == "DONE" || phase == "FAIL" || phase == "ESCALATED" || phase == "PLANNED"
 }
 
 type fixer struct {
@@ -67,7 +69,10 @@ type snapshot struct {
 	mrs                     []mrState
 	budget, budgetMax       string
 	daemon                  bool
-	ok, bad, esc, clean, ai int
+	// today / all-time counters from state/history.log
+	ok, bad, esc    int
+	tok, tbad, tesc int
+	tclean, tai     int
 }
 
 type tickMsg time.Time
@@ -116,27 +121,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.frame++
 		return m, tick()
 	case tea.KeyMsg:
+		// Cyrillic twins: the same physical keys on a Russian layout.
 		switch msg.String() {
-		case "q", "ctrl+c":
+		case "q", "й", "ctrl+c":
 			return m, tea.Quit
-		case "up", "k":
+		case "up", "k", "л":
 			if m.sel > 0 {
 				m.sel--
 			}
-		case "down", "j":
+		case "down", "j", "о":
 			if m.sel < len(m.snap.fixers)-1 {
 				m.sel++
 			}
-		case "enter", "l":
+		case "enter", "l", "д":
 			m.showLog = !m.showLog
 			if m.showLog {
 				m.logName, m.logLines = readLog(m.root, m.selectedIID())
 			}
-		case "r":
+		case "r", "к":
 			c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
 			_ = c.Start()
-		case "p":
+		case "p", "з":
 			go togglePause(m.root)
+		case "a", "ф":
+			// approve the selected PLANNED fixer: next tick re-runs it for real
+			if m.sel < len(m.snap.fixers) && m.snap.fixers[m.sel].phase == "PLANNED" {
+				iid := m.snap.fixers[m.sel].iid
+				_ = os.Remove(filepath.Join(m.root, "state", "tried-"+iid))
+				_ = os.Remove(filepath.Join(m.root, "state", "dry-"+iid))
+				if fh, err := os.Create(filepath.Join(m.root, "state", "approve-"+iid)); err == nil {
+					fh.Close()
+				}
+				c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
+				_ = c.Start()
+			}
 		}
 	}
 	return m, nil
@@ -157,11 +175,11 @@ func (m model) View() string {
 	if s.daemon {
 		d = green.Render("on")
 	}
-	b.WriteString(fmt.Sprintf("  daemon %s · AI budget %s/%s · today: %s / %s / %s · %d clean, %d AI\n\n",
+	b.WriteString(fmt.Sprintf("  daemon %s · AI budget %s/%s · today %s %s %s · total %s %s %s (%d clean, %d AI)\n\n",
 		d, s.budget, s.budgetMax,
-		green.Render(fmt.Sprintf("%d fixed", s.ok)), red.Render(fmt.Sprintf("%d failed", s.bad)),
-		yellow.Render(fmt.Sprintf("%d→human", s.esc)),
-		s.clean, s.ai))
+		green.Render(fmt.Sprintf("%d✓", s.ok)), red.Render(fmt.Sprintf("%d✗", s.bad)), yellow.Render(fmt.Sprintf("%d⚑", s.esc)),
+		green.Render(fmt.Sprintf("%d✓", s.tok)), red.Render(fmt.Sprintf("%d✗", s.tbad)), yellow.Render(fmt.Sprintf("%d⚑", s.tesc)),
+		s.tclean, s.tai))
 
 	if len(s.fixers) == 0 {
 		b.WriteString(dim.Render("  no active or recent fixers — no conflicts") + "\n")
@@ -187,7 +205,7 @@ func (m model) View() string {
 			style = green
 		case "FAIL":
 			style = red
-		case "AI_RESOLVE", "ESCALATED":
+		case "AI_RESOLVE", "PLAN", "PLANNED", "ESCALATED":
 			style = yellow
 		}
 		row := fmt.Sprintf("  %s %s [%s] %3d%%  %s %3dm%02ds  %s",
@@ -223,7 +241,7 @@ func (m model) View() string {
 		}
 	}
 
-	b.WriteString("\n" + dim.Render("  ↑↓ select · enter/l log · r run tick · p pause/resume · q quit"))
+	b.WriteString("\n" + dim.Render("  ↑↓ select · enter/l log · a approve PLANNED · r run tick · p pause/resume · q quit"))
 	return b.String()
 }
 
@@ -267,6 +285,40 @@ func readSnapshot(root string) snapshot {
 	}
 	s.daemon = daemonLoaded()
 
+	// today / all-time counters from the durable ledger
+	if data, err := os.ReadFile(filepath.Join(root, "state", "history.log")); err == nil {
+		for _, ln := range nonEmpty(strings.Split(string(data), "\n")) {
+			parts := strings.SplitN(ln, "|", 4)
+			if len(parts) < 4 {
+				continue
+			}
+			ts, _ := strconv.ParseInt(parts[0], 10, 64)
+			today := ts >= day0
+			switch parts[2] {
+			case "DONE":
+				s.tok++
+				if parts[3] == "clean" {
+					s.tclean++
+				} else if parts[3] == "ai" {
+					s.tai++
+				}
+				if today {
+					s.ok++
+				}
+			case "FAIL":
+				s.tbad++
+				if today {
+					s.bad++
+				}
+			case "ESCALATED":
+				s.tesc++
+				if today {
+					s.esc++
+				}
+			}
+		}
+	}
+
 	progress, _ := filepath.Glob(filepath.Join(root, "state", "progress-*.log"))
 	sort.Strings(progress)
 	for _, p := range progress {
@@ -281,27 +333,6 @@ func readSnapshot(root string) snapshot {
 		iid := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), "progress-"), ".log")
 		var f fixer
 		f.iid = iid
-		for _, ln := range lines {
-			parts := strings.SplitN(ln, "|", 3)
-			if len(parts) < 2 {
-				continue
-			}
-			ts, _ := strconv.ParseInt(parts[0], 10, 64)
-			if ts >= day0 {
-				switch parts[1] {
-				case "DONE":
-					s.ok++
-				case "FAIL":
-					s.bad++
-				case "ESCALATED":
-					s.esc++
-				case "MERGE_CLEAN":
-					s.clean++
-				case "AI_RESOLVE":
-					s.ai++
-				}
-			}
-		}
 		first := strings.SplitN(lines[0], "|", 3)
 		last := strings.SplitN(lines[len(lines)-1], "|", 3)
 		f.t0, _ = strconv.ParseInt(first[0], 10, 64)
@@ -311,8 +342,8 @@ func readSnapshot(root string) snapshot {
 			f.detail = last[2]
 		}
 		f.active = !terminal(f.phase)
-		if !f.active && now.Unix()-f.ts > 7200 {
-			continue // hide finished fixers older than 2h
+		if !f.active && f.phase != "PLANNED" && now.Unix()-f.ts > 7200 {
+			continue // hide finished fixers older than 2h; PLANNED waits for approve
 		}
 		s.fixers = append(s.fixers, f)
 	}

@@ -16,7 +16,7 @@ source "$ROOT/config.env"
 # shellcheck source=lib.sh
 source "$ROOT/lib.sh"
 
-IID="$1"; SRC="$2"; TGT="$3"; TITLE="${4:-}"
+IID="$1"; SRC="$2"; TGT="$3"; TITLE="${4:-}"; MODE="${5:-auto}"
 SIGIL="$(mm_ref_sigil)"
 PROG="$ROOT/state/progress-$IID.log"
 LOGDIR="$ROOT/logs"; mkdir -p "$LOGDIR" "$ROOT/worktrees" "$ROOT/state"
@@ -27,14 +27,18 @@ SUMFILE=".merge-medic-summary"
 ev() { printf '%s|%s|%s\n' "$(date +%s)" "$1" "${2:-}" >> "$PROG"; }
 notify() { mm_notify "$@"; }
 cleanup_wt() { git -C "$WATCH_REPO" worktree remove --force "$WT" 2>/dev/null || true; }
+# Durable all-time ledger (progress files get overwritten per run):
+# ts|iid|OUTCOME|mode  where mode = none|clean|ai
+resolve_mode="none"
+ledger() { printf '%s|%s|%s|%s\n' "$(date +%s)" "$IID" "$1" "$resolve_mode" >> "$ROOT/state/history.log"; }
 fail() {
-  ev FAIL "$1"
+  ev FAIL "$1"; ledger FAIL
   notify "${SIGIL}$IID: fix failed" "$1"
   cleanup_wt
   exit 1
 }
 escalate() {
-  ev ESCALATED "$1"
+  ev ESCALATED "$1"; ledger ESCALATED
   notify "${SIGIL}$IID: needs human" "$1"
   post_note "merge-medic: conflict escalated to a human — $1"
   cleanup_wt
@@ -58,8 +62,33 @@ post_note() {
   } >> "$LOGDIR/fixer-$IID.log" 2>&1 || true
 }
 
+# Human MR/PR comments newer than the plan file — corrections for the
+# approved run. Bot-authored comments (merge-medic prefix) are skipped.
+collect_feedback() { # $1 = plan file; its mtime is the cutoff
+  local cutoff
+  cutoff="$(stat -f%m "$1" 2>/dev/null || stat -c%Y "$1" 2>/dev/null || echo 0)"
+  if [ "${PROVIDER:-gitlab}" = "github" ]; then
+    gh pr view "$IID" --repo "$PROJECT_PATH" --json comments 2>/dev/null \
+      | jq -r --argjson t "$cutoff" '[.comments[] | select(.body | startswith("merge-medic") | not) | select((.createdAt | fromdateiso8601) > $t) | "- " + .body] | join("\n")' 2>/dev/null || true
+  else
+    ( cd "$WT" 2>/dev/null || cd "$WATCH_REPO"
+      GITLAB_HOST="${GITLAB_HOST:-}" glab api "projects/:fullpath/merge_requests/$IID/notes?order_by=created_at&sort=desc&per_page=20" 2>/dev/null ) \
+      | jq -r --argjson t "$cutoff" '[.[] | select(.system==false) | select(.body | startswith("merge-medic") | not) | select((.created_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > $t) | "- " + .body] | reverse | join("\n")' 2>/dev/null || true
+  fi
+}
+
 : > "$PROG"
 ev START "$SRC -> $TGT"
+
+# ── push guard: non-AUTO branches are only ever pushed by an approved run ─────
+src_is_auto=0
+for ab in ${AUTO_BRANCHES:-feat-*}; do
+  # shellcheck disable=SC2254
+  case "$SRC" in $ab) src_is_auto=1;; esac
+done
+if [ "$src_is_auto" = "0" ] && [ "$MODE" != "plan" ] && [ "$MODE" != "fix-approved" ]; then
+  fail "source branch '$SRC' is not in AUTO_BRANCHES and no approve exists"
+fi
 
 cd "$WATCH_REPO"
 git fetch --prune --quiet origin || fail "git fetch failed"
@@ -79,6 +108,15 @@ summary=""
 if git -c merge.conflictStyle=zdiff3 merge --no-ff --no-edit \
      -m "chore: merge origin/$TGT into $SRC (${SIGIL}$IID)" "origin/$TGT" >/dev/null 2>&1; then
   ev MERGE_CLEAN "no conflict markers — AI not needed (0 tokens)"
+  resolve_mode="clean"
+  if [ "$MODE" = "plan" ]; then
+    ev PLANNED "clean merge — approve (a) to push"
+    ledger PLANNED
+    post_note "merge-medic plan for ${SIGIL}$IID: origin/$TGT merges cleanly — no conflicts. Approve in the dashboard (hotkey a) and the bot will redo the merge, run the gates and push. Comment corrections here before approving; the approved run reads them."
+    notify "${SIGIL}$IID: plan ready" "clean merge — approve in dashboard (a)"
+    cleanup_wt
+    exit 0
+  fi
 else
   conflicts="$(git diff --name-only --diff-filter=U)"
   [ -z "$conflicts" ] && fail "merge failed without conflicting files"
@@ -129,6 +167,51 @@ else
     fi
   fi
 
+  # ── plan mode: describe the resolution, post it, wait for a human ───────────
+  if [ "$MODE" = "plan" ]; then
+    ev PLAN "$n file(s): $(printf '%s' "$conflicts" | tr '\n' ' ' | cut -c1-120)"
+    PLANFILE="$ROOT/state/plan-$IID.md"
+    set +e
+    claude -p "A merge of origin/$TGT into $SRC (${SIGIL}$IID${TITLE:+ — \"$TITLE\"}) has conflicts. You are in the worktree mid-merge with zdiff3 markers (||||||| shows the common ancestor). Do NOT edit anything — read the conflicted files and write a RESOLUTION PLAN as your answer.
+
+Conflicting files:
+$conflicts
+
+What the source branch ($SRC) did to these files:
+${src_hist:-<no commits found>}
+
+What the target branch ($TGT) did to these files:
+${tgt_hist:-<no commits found>}
+
+For each file: what each side changed, what you would keep and why, and any risk worth a human's attention. Be specific enough that a reviewer can approve or correct it in a comment. End with an overall risk assessment.$policy" \
+      --model "${CLAUDE_MODEL:-opus}" \
+      --permission-mode acceptEdits \
+      --allowedTools "Read Grep Glob Bash(git:*)" \
+      --disallowedTools "Edit Write WebFetch WebSearch Bash(curl:*) Bash(rm:*)" \
+      --add-dir "$WT" \
+      --output-format text > "$PLANFILE" 2>>"$LOGDIR/fixer-$IID.log"
+    prc=$?
+    set -e
+    git merge --abort 2>/dev/null || true
+    [ "$prc" != "0" ] && fail "plan agent exited with code $prc"
+    ev PLANNED "awaiting approve (a) — plan posted to ${SIGIL}$IID"
+    ledger PLANNED
+    post_note "merge-medic resolution plan for ${SIGIL}$IID. Approve in the dashboard (hotkey a) to let the bot execute it; comment corrections here first — the approved run reads them and they override the plan.
+
+$(cat "$PLANFILE")"
+    notify "${SIGIL}$IID: plan ready" "review & approve in dashboard (a)"
+    cleanup_wt
+    exit 0
+  fi
+
+  # approved run: feed the posted plan + newer human comments into the prompt
+  approved_ctx=""
+  if [ "$MODE" = "fix-approved" ] && [ -f "$ROOT/state/plan-$IID.md" ]; then
+    approved_ctx="$(printf '\n\nApproved resolution plan (execute it):\n%s' "$(cat "$ROOT/state/plan-$IID.md")")"
+    fb="$(collect_feedback "$ROOT/state/plan-$IID.md")"
+    [ -n "$fb" ] && approved_ctx+="$(printf '\n\nHuman corrections from MR comments — these OVERRIDE the plan and the defaults:\n%s' "$fb")"
+  fi
+
   ev AI_RESOLVE "$n file(s): $(printf '%s' "$conflicts" | tr '\n' ' ' | cut -c1-120)"
   AILOG="$LOGDIR/ai-$IID-$(date '+%Y%m%d-%H%M%S').log"
   set +e
@@ -156,7 +239,7 @@ Rules:
   write a one-line reason into a file named $ESCFILE in the repo root and stop.
 - After editing: git add each resolved file. Do NOT commit, do NOT push.
 - Write a short summary (per file: what each side wanted, what you kept and
-  why) into a file named $SUMFILE in the repo root.$policy" \
+  why) into a file named $SUMFILE in the repo root.$approved_ctx$policy" \
     --model "${CLAUDE_MODEL:-opus}" \
     --permission-mode acceptEdits \
     --allowedTools "Read Edit Write Glob Grep Bash(git:*)" \
@@ -183,6 +266,7 @@ Rules:
   git commit --no-edit >/dev/null 2>&1 \
     || git commit -m "chore: merge origin/$TGT into $SRC (${SIGIL}$IID)" >/dev/null
   ai_ran=1
+  resolve_mode="ai"
 fi
 
 ev VERIFY "${VERIFY_CMD:-<skipped>}"
@@ -209,6 +293,7 @@ ev PUSH "origin $SRC"
 git push origin "HEAD:$SRC" >/dev/null 2>&1 || fail "push rejected (branch moved ahead?)"
 
 ev DONE "merged origin/$TGT, gates green, pushed"
+ledger DONE
 notify "${SIGIL}$IID fixed ✓" "$SRC: merge $TGT + gates + push"
 if [ "$ai_ran" = "1" ] && [ -n "$summary" ]; then
   post_note "merge-medic resolved conflicts with origin/$TGT automatically.
