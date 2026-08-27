@@ -9,6 +9,7 @@
 package main
 
 import (
+	"crypto/sha1"
 	"fmt"
 	"os"
 	"os/exec"
@@ -162,7 +163,7 @@ type model struct {
 	root       string
 	snap       snapshot
 	sel        int // cursor within the focused panel
-	focus      int // 0 MRS · 1 HISTORY · 2 LIVE · 3 SETTINGS · 4 RUNS · 5 SPEND
+	focus      int // 0 MRS · 1 HISTORY · 2 LIVE · 3 SETTINGS · 4 RUNS · 5 SPEND · 6 HOTSPOTS
 	selH       int // HISTORY cursor (kept when switching focus)
 	liveOff    int // lines scrolled up from the tail of LIVE (0 = follow)
 	expanded   map[string]bool
@@ -180,6 +181,7 @@ type model struct {
 	typeK    int    // typed width of the newest feed line
 	selS     int // STATUS settings cursor: 0 budget · 1 deliver · 2 model
 	selM     int // MRS cursor
+	selHot   int // hotspots screen cursor
 }
 
 func main() {
@@ -388,11 +390,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.expanded = map[string]bool{}
 			m.expandedMR = map[string]bool{}
 		case "tab":
-			m.focus = (m.focus + 1) % 6
+			m.focus = (m.focus + 1) % 7
 		case "up", "k":
 			if m.screen == 2 {
 				if m.selF > 0 {
 					m.selF--
+				}
+				break
+			}
+			if m.screen == 5 {
+				if m.selHot > 0 {
+					m.selHot--
 				}
 				break
 			}
@@ -421,6 +429,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				break
 			}
+			if m.screen == 5 {
+				if m.selHot < len(m.snap.hotspots)-1 {
+					m.selHot++
+				}
+				break
+			}
 			if m.focus == 3 {
 				if m.selS < 2 {
 					m.selS++
@@ -446,6 +460,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.screen == 0 && m.focus == 5 {
 				m.screen = 4
+				break
+			}
+			if m.screen == 0 && m.focus == 6 {
+				m.screen = 5
 				break
 			}
 			if m.screen == 2 {
@@ -486,6 +504,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
 				_ = c.Start()
+			}
+		case "i":
+			if m.screen == 5 && m.selHot < len(m.snap.hotspots) {
+				go analyzeHotspot(m.root, m.snap.hotspots[m.selHot])
 			}
 		case "left", "h":
 			if m.focus == 3 && m.screen == 0 {
@@ -802,6 +824,9 @@ func (m model) View() string {
 	}
 	if m.screen == 3 {
 		return m.runsDetailView(14)
+	}
+	if m.screen == 5 {
+		return m.hotspotsScreen()
 	}
 	if m.screen == 4 {
 		return m.spendDetailView(14)
@@ -1144,7 +1169,7 @@ func (m model) View() string {
 				yellow.Render(strings.Repeat("▪", max(1, h.count*10/maxC))),
 				dim.Render(trunc(h.file, lw-24))))
 		}
-		lb.WriteString(titledBox(lw, "HOTSPOTS", "most-conflicted files", strings.Join(hs, "\n"), 0, false) + "\n")
+		lb.WriteString(titledBox(lw, "HOTSPOTS", "most-conflicted files", strings.Join(hs, "\n"), 0, m.focus == 6) + "\n")
 	}
 
 	if m.showLog {
@@ -1263,7 +1288,7 @@ func (m model) View() string {
 			fk = []string{key("↑↓", "scroll"), key("esc", "follow")}
 		case 3:
 			fk = []string{key("↑↓", "setting"), key("←→", "change")}
-		case 4, 5:
+		case 4, 5, 6:
 			fk = []string{key("enter", "full breakdown")}
 		}
 	}
@@ -1631,6 +1656,113 @@ func (m model) insightsView() string {
 	return b.String()
 }
 
+// hotspotCache returns the analysis cache path for a hotspot — keyed by
+// (file, conflict count) so the text stays STABLE until new conflicts land.
+func hotspotCache(root string, h hotspot) string {
+	sum := sha1.Sum([]byte(fmt.Sprintf("%s|%d", h.file, h.count)))
+	return filepath.Join(root, "state", fmt.Sprintf("ai-hotspot-%x.md", sum[:6]))
+}
+
+// analyzeHotspot generates the explanation once and caches it (atomic write;
+// a .run marker shows progress). Uses the instance's resolver model.
+func analyzeHotspot(root string, h hotspot) {
+	cache := hotspotCache(root, h)
+	if _, err := os.Stat(cache); err == nil {
+		return
+	}
+	run := cache + ".run"
+	if f, err := os.OpenFile(run, os.O_CREATE|os.O_EXCL, 0o644); err != nil {
+		return // already running
+	} else {
+		f.Close()
+	}
+	defer os.Remove(run)
+	repo := readConfigVal(root, "WATCH_REPO", "")
+	if home, err := os.UserHomeDir(); err == nil {
+		repo = strings.ReplaceAll(repo, "$HOME", home)
+	}
+	gitlog := ""
+	if repo != "" {
+		if out, err := exec.Command("git", "-C", repo, "log", "--oneline", "-15", "--", h.file).Output(); err == nil {
+			gitlog = string(out)
+		}
+	}
+	prompt := fmt.Sprintf(`The file %s keeps causing merge conflicts in this repository: %d AI-resolved conflicts so far, in MRs %s.
+
+Recent commits touching it:
+%s
+
+In 8-12 lines of GitHub-flavored markdown, explain: (1) WHY this file is likely a conflict magnet (structure? shared hotspot section? append-only list?), (2) 2-3 CONCRETE ways to stop the conflicts (split points, ownership, serialization), (3) which option you would pick. No preamble.`,
+		h.file, h.count, "!"+strings.Join(h.mrs, " !"), gitlog)
+	model := readConfigVal(root, "CLAUDE_MODEL", "sonnet")
+	out, err := exec.Command("claude", "-p", prompt, "--model", model).Output()
+	if err != nil || len(out) == 0 {
+		return
+	}
+	tmp := cache + ".tmp"
+	if os.WriteFile(tmp, out, 0o644) == nil {
+		_ = os.Rename(tmp, cache)
+	}
+}
+
+// hotspotsScreen — the full-screen hotspot browser with on-demand AI analysis.
+func (m model) hotspotsScreen() string {
+	s := m.snap
+	var b strings.Builder
+	b.WriteString(m.renderBanner())
+	var rows []string
+	if len(s.hotspots) == 0 {
+		rows = append(rows, dim.Render(" no archived AI runs yet"))
+	}
+	maxC := 1
+	if len(s.hotspots) > 0 {
+		maxC = s.hotspots[0].count
+	}
+	for i, h := range s.hotspots {
+		row := fmt.Sprintf(" %s %s %s %s",
+			amber.Render(fmt.Sprintf("%3d×", h.count)),
+			yellow.Render(strings.Repeat("▪", max(1, h.count*12/maxC))),
+			trunc(h.file, 52),
+			dim.Render("in !"+strings.Join(h.mrs, " !")))
+		if i == m.selHot {
+			row = selMark(row, m.width-6)
+		}
+		rows = append(rows, row)
+	}
+	bw := m.width
+	if bw > 100 {
+		bw = 100
+	}
+	b.WriteString(titledBox(bw, "HOTSPOTS", "conflict magnets · i = AI analysis", strings.Join(rows, "\n"), 0, true) + "\n")
+
+	// analysis panel for the selected file
+	if m.selHot < len(s.hotspots) {
+		h := s.hotspots[m.selHot]
+		cache := hotspotCache(m.root, h)
+		body := dim.Render(" press i — the resolver explains why this file clashes and how to stop it\n" +
+			" (generated once per state; the text stays stable until new conflicts land)")
+		if data, err := os.ReadFile(cache); err == nil {
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			capL := m.height - len(s.hotspots) - 12
+			if capL < 6 {
+				capL = 6
+			}
+			if len(lines) > capL {
+				lines = append(lines[:capL], dim.Render("  …"))
+			}
+			for i, ln := range lines {
+				lines[i] = " " + trunc(ln, bw-6)
+			}
+			body = strings.Join(lines, "\n")
+		} else if _, err := os.Stat(cache + ".run"); err == nil {
+			body = amber.Render(" ⠿ analyzing… (the answer will be cached)")
+		}
+		b.WriteString(titledBox(bw, "WHY", trunc(h.file, 60), body, 0, false) + "\n")
+	}
+	b.WriteString(" " + amber.Render("↑↓") + dim.Render(" file · ") + amber.Render("i") + dim.Render(" analyze · ") + amber.Render("esc") + dim.Render(" back · ") + amber.Render("q") + dim.Render(" quit"))
+	return b.String()
+}
+
 // readInstances lists installed merge-medic roots from the registry.
 func readInstances() []string {
 	home, _ := os.UserHomeDir()
@@ -1720,7 +1852,7 @@ func (m model) fleetView() string {
 
 func (m model) helpView() string {
 	rows := [][2]string{
-		{"tab", "cycle: MRS → HISTORY → LIVE → SETTINGS → RUNS → SPEND (enter opens breakdowns)"},
+		{"tab", "cycle: MRS → HISTORY → LIVE → SETTINGS → RUNS → SPEND → HOTSPOTS"},
 		{"↑↓ / j k", "move / scroll within the focused panel"},
 		{"enter", "details: MR info + clashes, or a run's phase timeline"},
 		{"o", "open the selected MR/PR in the browser"},
