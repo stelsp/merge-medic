@@ -1117,14 +1117,46 @@ func (m model) View() string {
 	if avail < 24 {
 		histH = 5
 	}
-	// ACTIVE (fixers) is small and fixed; MRS takes the rest
-	actH := len(act) + 2
-	if actH > 6 {
-		actH = 6
+	// ACTIVE (fixers) is small and fixed; MRS takes the rest. The focused
+	// panel may grow (expanded details) at the neighbors' expense — the top
+	// strip never moves and nothing exceeds the terminal height.
+	lines := func(items []string) int {
+		n := 0
+		for _, it := range items {
+			n += strings.Count(it, "\n") + 1
+		}
+		return n
 	}
-	mrsH := avail - topH - actH - hsH - histH
-	if mrsH < 6 {
-		mrsH = 6
+	budget := avail - topH - hsH
+	actWant := lines(act) + 2
+	histWant := lines(hist) + 2
+	mrsWant := lines(mrsRows) + 2
+	const minA, minM, minH = 3, 5, 4
+	actH := min(actWant, 6)
+	histH = min(histWant, histH)
+	if m.focus == 3 {
+		actH = min(actWant, budget-minM-minH)
+	}
+	if m.focus == 5 {
+		histH = min(histWant, budget-minA-minM)
+	}
+	actH = max(actH, minA)
+	histH = max(histH, minH)
+	mrsH := budget - actH - histH
+	if mrsH > mrsWant && m.focus != 4 {
+		// hand unused MRS space to HISTORY (more ledger visible)
+		extra := mrsH - mrsWant
+		histH = min(histWant, histH+extra)
+		mrsH = budget - actH - histH
+	}
+	if mrsH < minM {
+		mrsH = minM
+		if over := actH + histH + mrsH - budget; over > 0 {
+			histH = max(minH, histH-over)
+		}
+		if over := actH + histH + mrsH - budget; over > 0 {
+			actH = max(minA, actH-over)
+		}
 	}
 	actBoxH, mrsBoxH, histBoxH := 0, 0, 0
 	if wide {
@@ -1272,8 +1304,14 @@ func windowRows(items []string, selIdx, capLines int) []string {
 		return items
 	}
 	budget := capLines - 1 // reserve a line for the overflow markers
-	out := []string{items[selIdx]}
-	used := h(items[selIdx])
+	sel := items[selIdx]
+	if hh := h(sel); hh > budget {
+		ls := strings.Split(sel, "\n")
+		keep := max(1, budget-1)
+		sel = strings.Join(ls[:keep], "\n") + "\n" + dim.Render(fmt.Sprintf("      … +%d more lines", hh-keep))
+	}
+	out := []string{sel}
+	used := h(sel)
 	up, down := selIdx-1, selIdx+1
 	for used < budget && (up >= 0 || down < len(items)) {
 		if up >= 0 {
