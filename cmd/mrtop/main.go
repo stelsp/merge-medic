@@ -177,8 +177,7 @@ type model struct {
 	selF     int // fleet cursor
 	lastFeed string // newest feed line, for the typewriter effect
 	typeK    int    // typed width of the newest feed line
-	pickKind string // "" = no modal; "model" | "deliver"
-	pickSel  int
+	selS     int // STATUS settings cursor: 0 budget · 1 deliver · 2 model
 }
 
 func main() {
@@ -288,6 +287,42 @@ func openInBrowser(url string) {
 	_ = exec.Command(cmd, url).Start()
 }
 
+// adjustSetting changes the selected STATUS row by dir (-1 / +1) and writes
+// it straight to config.env — arrows are the whole interaction.
+func (m *model) adjustSetting(dir int) {
+	switch m.selS {
+	case 0: // ai budget; 0 = unlimited
+		cur, _ := strconv.Atoi(m.snap.budgetMax)
+		cur += dir
+		if cur < 0 {
+			cur = 0
+		}
+		setConfigVal(m.root, "DAILY_AGENT_RUNS", strconv.Itoa(cur))
+		m.snap.budgetMax = strconv.Itoa(cur)
+	case 1: // delivery
+		mode := "mr"
+		if m.snap.pushMode == "mr" {
+			mode = "direct"
+		}
+		setConfigVal(m.root, "PUSH_MODE", "\""+mode+"\"")
+		m.snap.pushMode = mode
+	case 2: // model (claude only)
+		if m.snap.resolver != "claude" {
+			return
+		}
+		order := []string{"opus", "sonnet", "haiku"}
+		i := 0
+		for j, o := range order {
+			if o == m.snap.model {
+				i = j
+			}
+		}
+		i = (i + dir + len(order)) % len(order)
+		setConfigVal(m.root, "CLAUDE_MODEL", "\""+order[i]+"\"")
+		m.snap.model = order[i]
+	}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -316,33 +351,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.frame++
 		return m, tick()
 	case tea.KeyMsg:
-		if m.pickKind != "" {
-			opts := m.pickOptions()
-			switch msg.String() {
-			case "esc", "q":
-				m.pickKind = ""
-			case "up", "k", "left", "h":
-				if m.pickSel > 0 {
-					m.pickSel--
-				}
-			case "down", "j", "right", "l":
-				if m.pickSel < len(opts)-1 {
-					m.pickSel++
-				}
-			case "enter":
-				choice := opts[m.pickSel]
-				switch m.pickKind {
-				case "model":
-					setConfigVal(m.root, "CLAUDE_MODEL", "\""+choice+"\"")
-					m.snap.model = choice
-				case "deliver":
-					setConfigVal(m.root, "PUSH_MODE", "\""+choice+"\"")
-					m.snap.pushMode = choice
-				}
-				m.pickKind = ""
-			}
-			return m, nil
-		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -374,6 +382,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			switch m.focus {
+			case 0:
+				if m.selS > 0 {
+					m.selS--
+				}
 			case 3:
 				if m.sel > 0 {
 					m.sel--
@@ -393,6 +405,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			switch m.focus {
+			case 0:
+				if m.selS < 2 {
+					m.selS++
+				}
 			case 3:
 				if m.sel < len(m.activeRefs())-1 {
 					m.sel++
@@ -452,6 +468,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
 				_ = c.Start()
 			}
+		case "left", "h":
+			if m.focus == 0 && m.screen == 0 {
+				m.adjustSetting(-1)
+			}
+		case "right":
+			if m.focus == 0 && m.screen == 0 {
+				m.adjustSetting(1)
+			}
 		case "+", "=":
 			if m.focus != 0 {
 				break
@@ -471,26 +495,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			setConfigVal(m.root, "DAILY_AGENT_RUNS", strconv.Itoa(cur))
 			m.snap.budgetMax = strconv.Itoa(cur)
-		case "M":
-			if m.focus != 0 || m.snap.resolver != "claude" {
-				break
-			}
-			m.pickKind, m.pickSel = "model", 0
-			for i, o := range m.pickOptions() {
-				if o == m.snap.model {
-					m.pickSel = i
-				}
-			}
-		case "m":
-			if m.focus != 0 {
-				break
-			}
-			m.pickKind, m.pickSel = "deliver", 0
-			for i, o := range m.pickOptions() {
-				if o == m.snap.pushMode {
-					m.pickSel = i
-				}
-			}
 		case "r":
 			c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
 			_ = c.Start()
@@ -552,35 +556,6 @@ func segBar(ph string, frame int) string {
 		}
 	}
 	return b.String()
-}
-
-// inlineSelect renders the options inside the STATUS line itself: the
-// cursored option glows amber, the currently-applied one carries a dot.
-func (m model) inlineSelect(cur string) string {
-	var parts []string
-	for i, o := range m.pickOptions() {
-		lbl := " " + o + " "
-		if o == cur {
-			lbl = " ●" + o + " "
-		}
-		if i == m.pickSel {
-			parts = append(parts, selRow.Render(lbl))
-		} else {
-			parts = append(parts, dim.Render(lbl))
-		}
-	}
-	return strings.Join(parts, "") + " " + dim.Render("←→ · enter · esc")
-}
-
-// pickOptions returns the choices for the active modal picker.
-func (m model) pickOptions() []string {
-	switch m.pickKind {
-	case "model":
-		return []string{"opus", "sonnet", "haiku"}
-	case "deliver":
-		return []string{"direct", "mr"}
-	}
-	return nil
 }
 
 // selMark highlights the selected row: amber bar + a full-width amber fill
@@ -851,25 +826,19 @@ func (m model) View() string {
 
 	bmax, _ := strconv.Atoi(s.budgetMax)
 	bcur, _ := strconv.Atoi(s.budget)
-	budgetLine := fmt.Sprintf("%s %s %s/%s %s", dim.Render("ai-budget"), yellow.Render(gauge(bcur, bmax, 12)), s.budget, s.budgetMax, dim.Render("+/-"))
+	budgetLine := fmt.Sprintf("%s %s %s/%s", dim.Render("ai-budget"), yellow.Render(gauge(bcur, bmax, 12)), s.budget, s.budgetMax)
 	if bmax == 0 {
-		budgetLine = fmt.Sprintf("%s %s today · %s %s", dim.Render("ai-budget"), s.budget, green.Render("∞ unlimited"), dim.Render("+/-"))
+		budgetLine = fmt.Sprintf("%s %s today · %s", dim.Render("ai-budget"), s.budget, green.Render("∞ unlimited"))
 	}
-	modelLine2 := dim.Render("model   ") + amber.Render(s.model) + " " + dim.Render("M")
+	modelLine2 := dim.Render("model   ") + amber.Render(s.model)
 	if s.resolver != "claude" {
 		modelLine2 = dim.Render("model   ") + amber.Render(s.model) + dim.Render(" ("+s.resolver+", config.env)")
-	}
-	if m.pickKind == "model" {
-		modelLine2 = dim.Render("model   ") + m.inlineSelect(s.model)
 	}
 	pm := green.Render("direct push")
 	if s.pushMode == "mr" {
 		pm = yellow.Render("via resolution MR")
 	}
-	deliverLine := dim.Render("deliver ") + pm + " " + dim.Render("m")
-	if m.pickKind == "deliver" {
-		deliverLine = dim.Render("deliver ") + m.inlineSelect(s.pushMode)
-	}
+	deliverLine := dim.Render("deliver ") + pm
 	statusLines := []string{
 		fmt.Sprintf("%s %s · daemon %s", amber.Render(string(orbit[m.frame%len(orbit)])),
 			time.Now().Format("15:04:05"), d),
@@ -909,6 +878,9 @@ func (m model) View() string {
 			clipped := make([]string, len(lines))
 			for i, ln := range lines {
 				clipped[i] = truncate.String(ln, uint(max(1, w-4)))
+				if title == "STATUS" && m.focus == 0 && m.screen == 0 && i == m.selS+1 {
+					clipped[i] = selMark(clipped[i], w-4)
+				}
 			}
 			return titledBox(w, title, "", strings.Join(clipped, "\n"), h, focused)
 		}
@@ -1190,6 +1162,9 @@ func (m model) runsDetailView() string {
 	days := make([]day, 14)
 	now := time.Now()
 	day0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Unix()
+	type mrAgg struct{ done, fail, esc int }
+	perMR := map[string]*mrAgg{}
+	var mrOrder []string
 	if data, err := os.ReadFile(filepath.Join(m.root, "state", "history.log")); err == nil {
 		for _, ln := range nonEmpty(strings.Split(string(data), "\n")) {
 			p := strings.Split(ln, "|")
@@ -1197,6 +1172,18 @@ func (m model) runsDetailView() string {
 				continue
 			}
 			ts, _ := strconv.ParseInt(p[0], 10, 64)
+			if perMR[p[1]] == nil {
+				perMR[p[1]] = &mrAgg{}
+				mrOrder = append(mrOrder, p[1])
+			}
+			switch p[2] {
+			case "DONE":
+				perMR[p[1]].done++
+			case "FAIL":
+				perMR[p[1]].fail++
+			case "ESCALATED":
+				perMR[p[1]].esc++
+			}
 			age := int((day0 + 86400 - ts) / 86400)
 			if age < 0 || age >= 14 {
 				continue
@@ -1217,6 +1204,14 @@ func (m model) runsDetailView() string {
 				d.esc++
 			}
 		}
+	}
+	sort.SliceStable(mrOrder, func(i, j int) bool {
+		a, b := perMR[mrOrder[i]], perMR[mrOrder[j]]
+		return a.done+a.fail+a.esc > b.done+b.fail+b.esc
+	})
+	titles := map[string]string{}
+	for _, mr := range m.snap.mrs {
+		titles[mr.iid] = mr.title
 	}
 	maxN := 1
 	for _, d := range days {
@@ -1247,6 +1242,49 @@ func (m model) runsDetailView() string {
 		fmt.Sprintf("  all time: %s %s %s · %d clean merges · %d AI resolutions",
 			green.Render(fmt.Sprintf("%d✓", s.tok)), red.Render(fmt.Sprintf("%d✗", s.tbad)),
 			yellow.Render(fmt.Sprintf("%d⚑", s.tesc)), s.tclean, s.tai))
+
+	// what kind of work is even open right now
+	kinds := map[string]int{}
+	for _, mr := range m.snap.mrs {
+		k := "other"
+		if i := strings.IndexAny(mr.title, ":(!"); i > 0 {
+			switch mr.title[:i] {
+			case "feat":
+				k = "feat"
+			case "fix", "hotfix":
+				k = "fix"
+			case "docs", "chore", "refactor", "test", "ci", "build":
+				k = "chore"
+			}
+		}
+		kinds[k]++
+	}
+	if len(m.snap.mrs) > 0 {
+		rows = append(rows, fmt.Sprintf("  open now: %s · %s · %s · %s",
+			green.Render(fmt.Sprintf("%d feat", kinds["feat"])),
+			yellow.Render(fmt.Sprintf("%d fix", kinds["fix"])),
+			dim.Render(fmt.Sprintf("%d chore/docs", kinds["chore"])),
+			dim.Render(fmt.Sprintf("%d other", kinds["other"]))))
+	}
+
+	rows = append(rows, "", dim.Render("  per MR, all time (runs: ✓ fixed · ✗ failed · ⚑ escalated):"))
+	shown := 0
+	for _, iid := range mrOrder {
+		if shown >= 8 {
+			rows = append(rows, dim.Render(fmt.Sprintf("   +%d more MRs", len(mrOrder)-shown)))
+			break
+		}
+		a := perMR[iid]
+		t := titles[iid]
+		if t == "" {
+			t = "(closed)"
+		}
+		rows = append(rows, fmt.Sprintf("   %s %s %s %s  %s",
+			bold.Render(fmt.Sprintf("!%-5s", iid)),
+			green.Render(fmt.Sprintf("%d✓", a.done)), red.Render(fmt.Sprintf("%d✗", a.fail)),
+			yellow.Render(fmt.Sprintf("%d⚑", a.esc)), dim.Render(trunc(t, 40))))
+		shown++
+	}
 	bw := m.width
 	if bw > 72 {
 		bw = 72
@@ -1438,9 +1476,8 @@ func (m model) helpView() string {
 		{"o", "open the selected MR/PR in the browser"},
 		{"tab", "cycle focus: STATUS → RUNS → SPEND → ACTIVE → HISTORY → LIVE"},
 		{"enter", "on focused RUNS / SPEND: full-screen breakdown with charts"},
-		{"+ / -", "raise / lower the daily AI budget when STATUS is focused (0 = unlimited)"},
-		{"m", "delivery select (STATUS focused): direct push / resolution MR"},
-		{"M", "model select (STATUS focused): opus / sonnet / haiku"},
+		{"+ / -", "budget shortcut while STATUS is focused (0 = unlimited)"},
+		{"← →", "change the selected STATUS setting (budget / delivery / model)"},
 		{"1 / 2 / 3", "screens: main dashboard / insights (hotspots, spend) / fleet (instances)"},
 		{"l", "toggle AI/fixer log panel for the selected MR"},
 		{"a", "approve the selected PLANNED plan (semi-auto branches)"},
