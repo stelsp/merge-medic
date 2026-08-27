@@ -172,8 +172,8 @@ gitignored.
 **Multiple repos:** one clone = one instance. Clone again under a different
 name (`~/.merge-medic-gh`, `~/.merge-medic-work`, …), give each its own
 `config.env` and run its `install.sh` — every instance gets its own scheduler
-job and its own suffixed CLI (`mrwatch-gh top`), fully independent state and
-dashboards.
+job and fully independent state; one `mrwatch` drives them all via the fleet
+screen (`2`).
 
 ## CLI
 
@@ -189,7 +189,7 @@ mrwatch pause/resume
 
 Everything live (event feed, open MRs, history, logs) is inside the
 dashboard — one window; the fleet screen (`2`) switches between installed
-instances, and suffixed commands (`mrwatch-gh …`) open theirs directly.
+instances.
 
 The dashboard is **`mrtop`** — a Go /
 [bubbletea](https://github.com/charmbracelet/bubbletea) ops console built by
