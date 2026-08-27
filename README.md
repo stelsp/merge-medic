@@ -103,13 +103,24 @@ WSL2 (see below), `jq`, `git`, your forge CLI —
 OpenRouter / local Ollama — bring your API key), or your own command
 (`RESOLVER=custom`).
 
+One command (clones + interactive wizard: offers to install missing deps,
+starts the forge/resolver logins, fills the config, sets up the scheduler):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/stelsp/merge-medic/main/get.sh | bash
+```
+
+Prefer not to pipe curl into bash? Same thing by hand:
+
 ```bash
 git clone https://github.com/stelsp/merge-medic && cd merge-medic
-./install.sh          # deps check, config.env, scheduler (DRY_RUN by default)
-vim config.env        # project, host, verify command
-mrwatch log -f        # watch a few dry ticks
-# happy? set DRY_RUN=0 in config.env — that's it
+bin/mrwatch setup     # the same wizard — deps, logins, config, scheduler
 ```
+
+Or fully manual: `./install.sh` (checks deps, seeds config.env, sets up the
+scheduler), then edit `config.env` yourself. Either way it starts in
+`DRY_RUN=1`: watch a few dry ticks with `mrwatch log -f`, then set `DRY_RUN=0`
+— that's it.
 
 ### Windows (WSL2)
 
