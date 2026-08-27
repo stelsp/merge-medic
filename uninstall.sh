@@ -16,12 +16,10 @@ elif [ "$OS" = "Linux" ]; then
         "$HOME/.config/systemd/user/$INST.timer"
   systemctl --user daemon-reload 2>/dev/null || true
 fi
-MRW="mrwatch"
-if [ "$INST" != "merge-medic" ]; then
-  SUF="${INST#merge-medic}"; SUF="${SUF#-}"
-  MRW="mrwatch-${SUF:-$INST}"
+# remove the shared symlink only if it points at THIS instance
+if [ "$(readlink "$HOME/.local/bin/mrwatch" 2>/dev/null)" = "$ROOT/bin/mrwatch" ]; then
+  rm -f "$HOME/.local/bin/mrwatch"
 fi
-rm -f "$HOME/.local/bin/$MRW"
 REG="$HOME/.config/merge-medic/instances"
 if [ -f "$REG" ]; then
   grep -vxF "$ROOT" "$REG" > "$REG.tmp" 2>/dev/null || true

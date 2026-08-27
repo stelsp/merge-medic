@@ -68,15 +68,13 @@ else
 fi
 
 # ── mrwatch on PATH ───────────────────────────────────────────────────────────
-# The default instance owns plain `mrwatch`; extra instances get a suffixed
-# command (e.g. ~/.merge-medic-gh -> `mrwatch-gh`) so they can coexist.
-MRW="mrwatch"
-if [ "$INST" != "merge-medic" ]; then
-  SUF="${INST#merge-medic}"; SUF="${SUF#-}"
-  MRW="mrwatch-${SUF:-$INST}"
-fi
+# One `mrwatch` for everything: the first installed instance owns the
+# symlink; other instances are reached from the dashboard's fleet screen (2).
 mkdir -p "$HOME/.local/bin"
-ln -sf "$ROOT/bin/mrwatch" "$HOME/.local/bin/$MRW"
+CUR="$(readlink "$HOME/.local/bin/mrwatch" 2>/dev/null || true)"
+if [ -z "$CUR" ] || [ ! -e "$CUR" ]; then
+  ln -sf "$ROOT/bin/mrwatch" "$HOME/.local/bin/mrwatch"
+fi
 
 # Registry of installed instances — plain `mrwatch` offers a project picker
 # when more than one is present.
@@ -87,7 +85,7 @@ case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) echo "  NOTE: add ~/.local/bin to your PATH" ;;
 esac
-echo "  CLI: $MRW (status/top/live/...)"
+echo "  CLI: mrwatch (fleet screen \"2\" switches instances)"
 
 # ── scheduler ─────────────────────────────────────────────────────────────────
 if [ "$OS" = "Darwin" ]; then
