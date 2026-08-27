@@ -108,6 +108,7 @@ type model struct {
 	frame    int
 	width    int
 	height   int
+	showHelp bool
 }
 
 func main() {
@@ -168,6 +169,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "?":
+			m.showHelp = !m.showHelp
+		case "esc":
+			m.showHelp = false
+			m.showLog = false
+			m.expanded = map[string]bool{}
 		case "up", "k":
 			if m.sel > 0 {
 				m.sel--
@@ -303,7 +310,7 @@ func (m model) renderHistRow(it item, idx int, aw int) string {
 		outcomeMark(it.phase), bold.Render(fmt.Sprintf("!%-4s", it.iid)),
 		dim.Render(time.Unix(it.t0, 0).Format("02.01 15:04")),
 		style.Render(fmt.Sprintf("%-10s", it.phase)), dur,
-		dim.Render(tag), dim.Render(trunc(detail, aw-46)))
+		dim.Render(tag), dim.Render(trunc(detail, aw-52)))
 	if idx == m.sel {
 		row = selRow.Render(row)
 	}
@@ -357,6 +364,9 @@ func (m model) renderBanner() string {
 }
 
 func (m model) View() string {
+	if m.showHelp {
+		return m.helpView()
+	}
 	s := m.snap
 	now := time.Now().Unix()
 	wide := m.width >= 110
@@ -380,8 +390,17 @@ func (m model) View() string {
 			green.Render(fmt.Sprintf("%d✓", s.tok)), red.Render(fmt.Sprintf("%d✗", s.tbad)), yellow.Render(fmt.Sprintf("%d⚑", s.tesc))),
 		fmt.Sprintf("%d clean · %d AI resolved", s.tclean, s.tai),
 	}
+	stripW := m.width - 12
+	if wide {
+		stripW = (m.width-2)/2 - 12
+	}
+	maxBadges := stripW / 7
 	strip := ""
-	for _, mr := range s.mrs {
+	for i, mr := range s.mrs {
+		if i >= maxBadges {
+			strip += dim.Render(fmt.Sprintf("+%d", len(s.mrs)-i))
+			break
+		}
 		switch mr.status {
 		case "conflict":
 			strip += red.Render("!"+mr.iid+"✗") + " "
@@ -470,7 +489,29 @@ func (m model) View() string {
 			sectionTitle.Render("LIVE") + "\n" + body) + "\n")
 	}
 
-	b.WriteString(dim.Render("↑↓ select · enter timeline · l log · a approve · r tick · p pause · q quit"))
+	b.WriteString(dim.Render("↑↓ move · enter details · a approve · ? help · q quit"))
+	return b.String()
+}
+
+func (m model) helpView() string {
+	rows := [][2]string{
+		{"↑↓ / j k", "move selection"},
+		{"enter / e", "expand phase timeline for the selected run"},
+		{"l", "toggle AI/fixer log panel for the selected MR"},
+		{"a", "approve the selected PLANNED plan (semi-auto branches)"},
+		{"r", "force a watcher tick now"},
+		{"p", "pause / resume the daemon"},
+		{"esc", "close panels / collapse everything"},
+		{"?", "this help"},
+		{"q", "quit"},
+	}
+	var b strings.Builder
+	b.WriteString(m.renderBanner() + "\n")
+	for _, r := range rows {
+		b.WriteString(fmt.Sprintf("  %s  %s\n", bold.Render(fmt.Sprintf("%-9s", r[0])), r[1]))
+	}
+	b.WriteString("\n" + dim.Render("  CLI: mrwatch status · live · mrs · agent <iid> · run · pause/resume"))
+	b.WriteString("\n\n" + dim.Render("  press ? or esc to return"))
 	return b.String()
 }
 
