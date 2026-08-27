@@ -682,7 +682,7 @@ func (m model) renderRow(it item, idx int, now int64, aw int) string {
 		mark, bold.Render(fmt.Sprintf("!%-4s", it.iid)), dim.Render(when),
 		segBar(it.phase, m.frame),
 		style.Render(fmt.Sprintf("%-10s", it.phase)), el/60, el%60,
-		dim.Render(tag), dim.Render(trunc(detail, aw-48)))
+		dim.Render(tag), dim.Render(trunc(detail, aw-52)))
 	if idx == m.sel && m.focus == 3 {
 		row = selMark(row, aw)
 	}
@@ -1974,9 +1974,9 @@ func readSnapshot(root string, width int) snapshot {
 			it.detail = last[2]
 		}
 		it.active = true
-		// terminal runs land in HISTORY via the ledger; PLANNED still needs
-		// action, so it stays in ACTIVE as a waiter
-		if terminal(it.phase) && it.phase != "PLANNED" && it.phase != "DEFERRED" {
+		// terminal runs land in HISTORY via the ledger; PLANNED and ESCALATED
+		// still need a human action, so they stay in ACTIVE as waiters
+		if terminal(it.phase) && it.phase != "PLANNED" && it.phase != "DEFERRED" && it.phase != "ESCALATED" {
 			continue
 		}
 		s.activeRows = append(s.activeRows, it)
@@ -2010,10 +2010,21 @@ func readSnapshot(root string, width int) snapshot {
 					}
 				}
 			}
-			// PLANNED entries whose progress file is still PLANNED are shown
-			// in ACTIVE as waiters — skip the duplicate here
+			// PLANNED/ESCALATED entries whose progress file still shows that
+			// state are waiters in ACTIVE — skip the ledger duplicate here
 			if it.phase == "PLANNED" {
 				continue
+			}
+			if it.phase == "ESCALATED" {
+				dup := false
+				for _, a := range s.activeRows {
+					if a.iid == it.iid && a.phase == "ESCALATED" {
+						dup = true
+					}
+				}
+				if dup {
+					continue
+				}
 			}
 			s.histRows = append(s.histRows, it)
 
@@ -2205,6 +2216,21 @@ func readSnapshot(root string, width int) snapshot {
 		}
 		s.mrs = append(s.mrs, mr)
 	}
+	// an ESCALATED waiter whose MR is no longer open was resolved by hand —
+	// it stops waiting and lives only in HISTORY
+	openNow := map[string]bool{}
+	for _, mr := range s.mrs {
+		openNow[mr.iid] = true
+	}
+	kept := s.activeRows[:0]
+	for _, a := range s.activeRows {
+		if a.phase == "ESCALATED" && !openNow[a.iid] {
+			continue
+		}
+		kept = append(kept, a)
+	}
+	s.activeRows = kept
+
 	sort.Slice(s.mrs, func(i, j int) bool {
 		ci := s.mrs[i].status == "conflict"
 		cj := s.mrs[j].status == "conflict"
