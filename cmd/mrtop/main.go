@@ -22,6 +22,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/truncate"
+	"regexp"
 )
 
 // Night-shift ops console: sharp single borders, one amber accent for
@@ -160,7 +161,7 @@ type model struct {
 	root       string
 	snap       snapshot
 	sel        int // cursor within the focused panel
-	focus      int // 0 = STATUS, 1 = ACTIVE, 2 = HISTORY, 3 = LIVE
+	focus      int // 0 STATUS · 1 RUNS · 2 SPEND · 3 ACTIVE · 4 HISTORY · 5 LIVE
 	selH       int // HISTORY cursor (kept when switching focus)
 	liveOff    int // lines scrolled up from the tail of LIVE (0 = follow)
 	expanded   map[string]bool
@@ -238,7 +239,7 @@ func (m model) histRefs() []rowRef {
 
 // focusedRows returns the row list of the panel that owns the cursor.
 func (m model) focusedRows() []rowRef {
-	if m.focus == 2 {
+	if m.focus == 4 {
 		return m.histRefs()
 	}
 	return m.activeRefs()
@@ -247,10 +248,10 @@ func (m model) focusedRows() []rowRef {
 func (m model) selected() (rowRef, bool) {
 	rows := m.focusedRows()
 	sel := m.sel
-	if m.focus == 2 {
+	if m.focus == 4 {
 		sel = m.selH
 	}
-	if (m.focus == 1 || m.focus == 2) && sel >= 0 && sel < len(rows) {
+	if (m.focus == 3 || m.focus == 4) && sel >= 0 && sel < len(rows) {
 		return rows[sel], true
 	}
 	return rowRef{}, false
@@ -354,13 +355,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "3":
 			m.screen = 2
 		case "esc":
+			if m.screen == 3 || m.screen == 4 {
+				m.screen = 0
+				break
+			}
 			m.showHelp = false
 			m.showLog = false
 			m.liveOff = 0
 			m.expanded = map[string]bool{}
 			m.expandedMR = map[string]bool{}
 		case "tab":
-			m.focus = (m.focus + 1) % 4
+			m.focus = (m.focus + 1) % 6
 		case "up", "k":
 			if m.screen == 2 {
 				if m.selF > 0 {
@@ -369,15 +374,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			switch m.focus {
-			case 1:
+			case 3:
 				if m.sel > 0 {
 					m.sel--
 				}
-			case 2:
+			case 4:
 				if m.selH > 0 {
 					m.selH--
 				}
-			case 3:
+			case 5:
 				m.liveOff++
 			}
 		case "down", "j":
@@ -388,18 +393,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			switch m.focus {
-			case 1:
+			case 3:
 				if m.sel < len(m.activeRefs())-1 {
 					m.sel++
 				}
-			case 2:
+			case 4:
 				if m.selH < len(m.histRefs())-1 {
 					m.selH++
 				}
-			case 3:
+			case 5:
 				m.liveOff = max(0, m.liveOff-1)
 			}
 		case "enter", "e":
+			if m.screen == 0 && m.focus == 1 {
+				m.screen = 3
+				break
+			}
+			if m.screen == 0 && m.focus == 2 {
+				m.screen = 4
+				break
+			}
 			if m.screen == 2 {
 				insts := readInstances()
 				if m.selF >= 0 && m.selF < len(insts) {
@@ -572,7 +585,13 @@ func (m model) pickOptions() []string {
 
 // selMark highlights the selected row: amber bar + a full-width amber fill
 // (same color as the focused border), padded to the panel's content width.
+var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
 func selMark(row string, w int) string {
+	// inner color spans end with an SGR reset that also kills the background,
+	// so the fill used to stop at the first styled cell — strip ALL codes and
+	// paint the whole line dark-on-amber
+	row = ansiRe.ReplaceAllString(row, "")
 	if strings.HasPrefix(row, " ") {
 		row = row[1:]
 	}
@@ -646,7 +665,7 @@ func (m model) renderRow(it item, idx int, now int64, aw int) string {
 		segBar(it.phase, m.frame),
 		style.Render(fmt.Sprintf("%-10s", it.phase)), el/60, el%60,
 		dim.Render(tag), dim.Render(trunc(detail, aw-48)))
-	if idx == m.sel && m.focus == 1 {
+	if idx == m.sel && m.focus == 3 {
 		row = selMark(row, aw)
 	}
 	if m.expanded[it.key()] {
@@ -685,7 +704,7 @@ func (m model) renderHistRow(it item, idx int, aw int) string {
 		dim.Render(time.Unix(it.t0, 0).Format("02.01 15:04")),
 		style.Render(fmt.Sprintf("%-10s", it.phase)), dur,
 		dim.Render(tag), dim.Render(trunc(detail, aw-48)))
-	if idx == m.selH && m.focus == 2 {
+	if idx == m.selH && m.focus == 4 {
 		row = selMark(row, aw)
 	}
 	if m.expanded[it.key()] {
@@ -795,6 +814,12 @@ func (m model) View() string {
 	if m.screen == 2 {
 		return m.fleetView()
 	}
+	if m.screen == 3 {
+		return m.runsDetailView()
+	}
+	if m.screen == 4 {
+		return m.spendDetailView()
+	}
 	s := m.snap
 	now := time.Now().Unix()
 	wide := m.width >= 110
@@ -877,7 +902,8 @@ func (m model) View() string {
 		w3 := lw - w1 - w2
 		h := max(len(statusLines), max(len(runLines), len(spendLines)))
 		boxH := func(w int, title string, lines []string) string {
-			focused := title == "STATUS" && m.focus == 0
+			focused := (title == "STATUS" && m.focus == 0) ||
+				(title == "RUNS" && m.focus == 1) || (title == "SPEND" && m.focus == 2)
 			// clip (ANSI-aware) instead of letting lipgloss wrap — a wrapped
 			// line would inflate one box past the shared height
 			clipped := make([]string, len(lines))
@@ -988,7 +1014,7 @@ func (m model) View() string {
 				dim.Render(fmt.Sprintf("%3s", age)),
 				dim.Render(fmt.Sprintf("%-8s", trunc(mr.author, 8))),
 				titleStyled(title, tstyle, aw-(31+bcol)))
-			if idx == m.sel && m.focus == 1 {
+			if idx == m.sel && m.focus == 3 {
 				row = selMark(row, aw)
 			}
 			if m.expandedMR[mr.iid] {
@@ -1045,8 +1071,8 @@ func (m model) View() string {
 	if nConf > 0 {
 		actMeta = fmt.Sprintf("%d MRs · %d✗%s", len(s.mrs), nConf, tgtMeta)
 	}
-	lb.WriteString(titledBox(lw, "ACTIVE", actMeta, strings.Join(act, "\n"), 0, m.focus == 1) + "\n")
-	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), 0, m.focus == 2) + "\n")
+	lb.WriteString(titledBox(lw, "ACTIVE", actMeta, strings.Join(act, "\n"), 0, m.focus == 3) + "\n")
+	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), 0, m.focus == 4) + "\n")
 
 	if m.showLog {
 		lb.WriteString(bold.Render("log ") + dim.Render(m.logName) + "\n")
@@ -1105,12 +1131,12 @@ func (m model) View() string {
 			wl = wl[start:end]
 			// with LIVE focused, the cursor line sits at the bottom of the
 			// window and j/k walk it line by line
-			if m.focus == 3 && len(wl) > 0 {
+			if m.focus == 5 && len(wl) > 0 {
 				wl[len(wl)-1] = selMark(wl[len(wl)-1], liveW-4)
 			}
 			body = strings.Join(wl, "\n")
 		}
-		liveBox := titledBox(liveW, "LIVE", badge, body, total-2, m.focus == 3)
+		liveBox := titledBox(liveW, "LIVE", badge, body, total-2, m.focus == 5)
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, liveBox) + "\n")
 	} else {
 		b.WriteString(lb.String())
@@ -1144,6 +1170,114 @@ func (m model) View() string {
 	b.WriteString(" " + key("tab", "focus") + sep + key("↑↓", "move") + sep + key("enter", "details") + sep +
 		key("o", "open") + sep + key("a", "approve") + sep + key("2", "insights") + sep + key("3", "fleet") + sep +
 		key("?", "help") + sep + key("q", "quit"))
+	return b.String()
+}
+
+// runsDetailView — enter on RUNS: per-day outcome table for two weeks.
+func (m model) runsDetailView() string {
+	s := m.snap
+	var b strings.Builder
+	b.WriteString(m.renderBanner())
+	type day struct{ done, fail, esc, clean, ai int }
+	days := make([]day, 14)
+	now := time.Now()
+	day0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Unix()
+	if data, err := os.ReadFile(filepath.Join(m.root, "state", "history.log")); err == nil {
+		for _, ln := range nonEmpty(strings.Split(string(data), "\n")) {
+			p := strings.Split(ln, "|")
+			if len(p) < 3 {
+				continue
+			}
+			ts, _ := strconv.ParseInt(p[0], 10, 64)
+			age := int((day0 + 86400 - ts) / 86400)
+			if age < 0 || age >= 14 {
+				continue
+			}
+			d := &days[13-age]
+			switch p[2] {
+			case "DONE":
+				d.done++
+				if len(p) > 3 && p[3] == "clean" {
+					d.clean++
+				}
+				if len(p) > 3 && p[3] == "ai" {
+					d.ai++
+				}
+			case "FAIL":
+				d.fail++
+			case "ESCALATED":
+				d.esc++
+			}
+		}
+	}
+	maxN := 1
+	for _, d := range days {
+		if n := d.done + d.fail + d.esc; n > maxN {
+			maxN = n
+		}
+	}
+	var rows []string
+	rows = append(rows, dim.Render("  day    fixes                              ✓    ✗    ⚑   clean/ai"))
+	for i, d := range days {
+		date := time.Unix(day0+86400-int64(14-i)*86400, 0).Format("02.01")
+		total := d.done + d.fail + d.esc
+		bw := 0
+		if total > 0 {
+			bw = max(1, total*24/maxN)
+		}
+		bar := green.Render(strings.Repeat("█", bw*d.done/max(total, 1))) +
+			red.Render(strings.Repeat("█", bw*d.fail/max(total, 1))) +
+			yellow.Render(strings.Repeat("█", bw*d.esc/max(total, 1)))
+		rows = append(rows, fmt.Sprintf("  %s  %-24s %s %s %s   %d/%d",
+			dim.Render(date), bar,
+			green.Render(fmt.Sprintf("%3d", d.done)), red.Render(fmt.Sprintf("%3d", d.fail)),
+			yellow.Render(fmt.Sprintf("%3d", d.esc)), d.clean, d.ai))
+	}
+	rows = append(rows, "",
+		fmt.Sprintf("  all time: %s %s %s · %d clean merges · %d AI resolutions",
+			green.Render(fmt.Sprintf("%d✓", s.tok)), red.Render(fmt.Sprintf("%d✗", s.tbad)),
+			yellow.Render(fmt.Sprintf("%d⚑", s.tesc)), s.tclean, s.tai))
+	b.WriteString(titledBox(m.width, "RUNS · 14 days", "", strings.Join(rows, "\n"), 0, true) + "\n")
+	b.WriteString(" " + amber.Render("esc") + dim.Render(" back · ") + amber.Render("q") + dim.Render(" quit"))
+	return b.String()
+}
+
+// spendDetailView — enter on SPEND: $/day table, per-model, top runs.
+func (m model) spendDetailView() string {
+	s := m.snap
+	var b strings.Builder
+	b.WriteString(m.renderBanner())
+	maxS := 0.001
+	for _, v := range s.spendDaily {
+		if v > maxS {
+			maxS = v
+		}
+	}
+	now := time.Now()
+	day0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Unix()
+	var rows []string
+	rows = append(rows, dim.Render("  day    spend"))
+	for i, v := range s.spendDaily {
+		date := time.Unix(day0+86400-int64(14-i)*86400, 0).Format("02.01")
+		bw := int(v / maxS * 24)
+		rows = append(rows, fmt.Sprintf("  %s  %-24s $%.2f",
+			dim.Render(date), amber.Render(strings.Repeat("█", bw)), v))
+	}
+	rows = append(rows, "",
+		fmt.Sprintf("  today ≈$%.2f · all time $%.2f", s.spendToday, s.spend),
+		dim.Render("  per model: "+s.modelLine), "", dim.Render("  most expensive runs:"))
+	for _, r := range s.topRuns {
+		short := r.model
+		if i := strings.Index(short, "claude-"); i >= 0 {
+			short = short[i+7:]
+		}
+		rows = append(rows, fmt.Sprintf("   %s %s %s %s",
+			amber.Render(fmt.Sprintf("$%.2f", r.cost)), bold.Render(fmt.Sprintf("!%-5s", r.iid)),
+			dim.Render(fmt.Sprintf("%-14s", trunc(short, 14))),
+			dim.Render(time.Unix(r.ts, 0).Format("02.01 15:04"))))
+	}
+	b.WriteString(titledBox(m.width, "SPEND", "", strings.Join(rows, "\n"), 0, true) + "\n")
+	b.WriteString(" " + amber.Render("esc") + dim.Render(" back · ") + amber.Render("q") + dim.Render(" quit"))
 	return b.String()
 }
 
@@ -1280,7 +1414,8 @@ func (m model) helpView() string {
 		{"↑↓ / j k", "move selection"},
 		{"enter / e", "details: phase timeline (runs) / MR info + clashes (MRs)"},
 		{"o", "open the selected MR/PR in the browser"},
-		{"tab", "cycle focus: ACTIVE → HISTORY → LIVE (j/k scrolls the log)"},
+		{"tab", "cycle focus: STATUS → RUNS → SPEND → ACTIVE → HISTORY → LIVE"},
+		{"enter", "on focused RUNS / SPEND: full-screen breakdown with charts"},
 		{"+ / -", "raise / lower the daily AI budget when STATUS is focused (0 = unlimited)"},
 		{"m", "delivery select (STATUS focused): direct push / resolution MR"},
 		{"M", "model select (STATUS focused): opus / sonnet / haiku"},
