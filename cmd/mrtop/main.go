@@ -79,7 +79,7 @@ type item struct {
 
 func (it item) key() string { return it.iid + "@" + strconv.FormatInt(it.t0, 10) }
 
-type mrState struct{ iid, status string }
+type mrState struct{ iid, status, src, tgt, title string }
 
 type snapshot struct {
 	activeRows, histRows []item
@@ -271,7 +271,7 @@ func (m model) renderRow(it item, idx int, now int64, aw int) string {
 		mark, bold.Render(fmt.Sprintf("!%-4s", it.iid)), dim.Render(when),
 		bar(pct, bw), pct,
 		style.Render(fmt.Sprintf("%-10s", it.phase)), el/60, el%60,
-		dim.Render(tag), dim.Render(trunc(it.detail, aw-(48+bw))))
+		dim.Render(tag), dim.Render(trunc(it.detail, aw-(49+bw))))
 	if idx == m.sel {
 		row = selRow.Render(row)
 	}
@@ -310,7 +310,7 @@ func (m model) renderHistRow(it item, idx int, aw int) string {
 		outcomeMark(it.phase), bold.Render(fmt.Sprintf("!%-4s", it.iid)),
 		dim.Render(time.Unix(it.t0, 0).Format("02.01 15:04")),
 		style.Render(fmt.Sprintf("%-10s", it.phase)), dur,
-		dim.Render(tag), dim.Render(trunc(detail, aw-52)))
+		dim.Render(tag), dim.Render(trunc(detail, aw-48)))
 	if idx == m.sel {
 		row = selRow.Render(row)
 	}
@@ -381,85 +381,103 @@ func (m model) View() string {
 		b.WriteString(m.renderBanner())
 	}
 
-	// ── STATUS / METRICS boxes ────────────────────────────────────────────────
+	// box renders a section whose TOTAL printed width (border included) is w —
+	// lipgloss adds the border on top of Width, hence the -2.
+	box := func(w int, title, body string) string {
+		return section.Width(w - 2).Render(sectionTitle.Render(title) + "\n" + body)
+	}
+
+	// ── top strip: STATUS · RUNS · SPEND ──────────────────────────────────────
+	bmax, _ := strconv.Atoi(s.budgetMax)
+	bcur, _ := strconv.Atoi(s.budget)
 	statusLines := []string{
 		fmt.Sprintf("%s %s · daemon %s", dim.Render(string(orbit[m.frame%len(orbit)])),
 			time.Now().Format("15:04:05"), d),
-		fmt.Sprintf("today %s %s %s · total %s %s %s",
-			green.Render(fmt.Sprintf("%d✓", s.ok)), red.Render(fmt.Sprintf("%d✗", s.bad)), yellow.Render(fmt.Sprintf("%d⚑", s.esc)),
-			green.Render(fmt.Sprintf("%d✓", s.tok)), red.Render(fmt.Sprintf("%d✗", s.tbad)), yellow.Render(fmt.Sprintf("%d⚑", s.tesc))),
-		fmt.Sprintf("%d clean · %d AI resolved", s.tclean, s.tai),
-	}
-	stripW := m.width - 12
-	if wide {
-		stripW = (m.width-2)/2 - 12
-	}
-	maxBadges := stripW / 7
-	strip := ""
-	for i, mr := range s.mrs {
-		if i >= maxBadges {
-			strip += dim.Render(fmt.Sprintf("+%d", len(s.mrs)-i))
-			break
-		}
-		switch mr.status {
-		case "conflict":
-			strip += red.Render("!"+mr.iid+"✗") + " "
-		case "mergeable":
-			strip += green.Render("!"+mr.iid+"✓") + " "
-		default:
-			strip += dim.Render("!"+mr.iid+"?") + " "
-		}
-	}
-	if strip != "" {
-		statusLines = append(statusLines, dim.Render("MRs ")+strip)
-	}
-
-	bmax, _ := strconv.Atoi(s.budgetMax)
-	bcur, _ := strconv.Atoi(s.budget)
-	metricLines := []string{
 		fmt.Sprintf("%s %s %s/%s", dim.Render("ai-budget"), yellow.Render(gauge(bcur, bmax, 12)), s.budget, s.budgetMax),
-		fmt.Sprintf("%s  %s 14d", dim.Render("activity"), green.Render(sparkline(s.daily))),
-		fmt.Sprintf("%s     ≈$%.2f today · $%.2f all", dim.Render("spend"), s.spendToday, s.spend),
+	}
+	runLines := []string{
+		fmt.Sprintf("today  %s %s %s", green.Render(fmt.Sprintf("%d✓", s.ok)),
+			red.Render(fmt.Sprintf("%d✗", s.bad)), yellow.Render(fmt.Sprintf("%d⚑", s.esc))),
+		fmt.Sprintf("total  %s %s %s · %dc/%dai", green.Render(fmt.Sprintf("%d✓", s.tok)),
+			red.Render(fmt.Sprintf("%d✗", s.tbad)), yellow.Render(fmt.Sprintf("%d⚑", s.tesc)),
+			s.tclean, s.tai),
+		fmt.Sprintf("%s %s 14d", dim.Render("activity"), green.Render(sparkline(s.daily))),
+	}
+	spendLines := []string{
+		fmt.Sprintf("≈$%.2f today · $%.2f all", s.spendToday, s.spend),
 	}
 	if s.modelLine != "" {
-		metricLines = append(metricLines, dim.Render("tokens    "+s.modelLine))
+		spendLines = append(spendLines, dim.Render(s.modelLine))
 	}
 
 	if wide {
-		half := (m.width - 2) / 2
-		row := lipgloss.JoinHorizontal(lipgloss.Top,
-			section.Width(half).Render(sectionTitle.Render("STATUS")+"\n"+strings.Join(statusLines, "\n")),
-			section.Width(m.width-2-half).Render(sectionTitle.Render("METRICS")+"\n"+strings.Join(metricLines, "\n")))
-		b.WriteString(row + "\n")
+		w1 := m.width / 3
+		w2 := m.width / 3
+		w3 := m.width - w1 - w2
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top,
+			box(w1, "STATUS", strings.Join(statusLines, "\n")),
+			box(w2, "RUNS", strings.Join(runLines, "\n")),
+			box(w3, "SPEND", strings.Join(spendLines, "\n"))) + "\n")
 	} else {
-		b.WriteString(section.Width(m.width - 2).Render(sectionTitle.Render("STATUS") + "\n" +
-			strings.Join(append(statusLines, metricLines...), "\n")) + "\n")
+		all := append(append(statusLines, runLines...), spendLines...)
+		b.WriteString(box(m.width, "STATUS", strings.Join(all, "\n")) + "\n")
 	}
 
-	// ── ACTIVE / HISTORY ──────────────────────────────────────────────────────
+	// ── ACTIVE (fixers + open MRs) / HISTORY ──────────────────────────────────
 	idx := 0
-	colw := m.width - 2
+	lw, rw := m.width, m.width
 	if wide {
-		colw = (m.width - 2) / 2
+		lw = m.width / 2
+		rw = m.width - lw
 	}
+	aw := lw - 4 // content width inside border+padding
+	hw := rw - 4
 	var act []string
-	if len(s.activeRows) == 0 {
-		act = append(act, dim.Render(" no active fixers"))
-	}
+	fixing := map[string]bool{}
 	for _, it := range s.activeRows {
-		act = append(act, m.renderRow(it, idx, now, colw))
+		act = append(act, m.renderRow(it, idx, now, aw))
+		fixing[it.iid] = true
 		idx++
+	}
+	if len(s.mrs) > 0 {
+		if len(act) > 0 {
+			act = append(act, dim.Render(strings.Repeat("─", max(1, aw-1))))
+		}
+		for _, mr := range s.mrs {
+			ic, st := dim.Render("?"), dim
+			switch mr.status {
+			case "conflict":
+				ic, st = red.Render("✗"), red
+			case "mergeable":
+				ic, st = green.Render("✓"), green
+			}
+			ref := ""
+			if mr.src != "" {
+				ref = mr.src + "→" + mr.tgt
+			}
+			gear := "  "
+			if fixing[mr.iid] {
+				gear = blue.Render("⚙ ")
+			}
+			act = append(act, fmt.Sprintf(" %s %s %s%s %s", ic,
+				bold.Render(fmt.Sprintf("!%-4s", mr.iid)), gear,
+				st.Render(trunc(ref, 26)),
+				dim.Render(trunc(mr.title, aw-(12+min(26, len([]rune(ref))))))))
+		}
+	}
+	if len(act) == 0 {
+		act = append(act, dim.Render(" no open MRs"))
 	}
 	var hist []string
 	if len(s.histRows) == 0 {
 		hist = append(hist, dim.Render(" no runs yet"))
 	}
 	for _, it := range s.histRows {
-		hist = append(hist, m.renderHistRow(it, idx, colw))
+		hist = append(hist, m.renderHistRow(it, idx, hw))
 		idx++
 	}
-	actBox := section.Width(colw).Render(sectionTitle.Render("ACTIVE") + "\n" + strings.Join(act, "\n"))
-	histBox := section.Width(colw).Render(sectionTitle.Render("HISTORY") + "\n" + strings.Join(hist, "\n"))
+	actBox := box(lw, "ACTIVE", strings.Join(act, "\n"))
+	histBox := box(rw, "HISTORY", strings.Join(hist, "\n"))
 	if wide {
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, actBox, histBox) + "\n")
 	} else {
@@ -485,8 +503,7 @@ func (m model) View() string {
 		if body == "" {
 			body = dim.Render(" quiet — waiting for events")
 		}
-		b.WriteString(section.Width(m.width - 2).Render(
-			sectionTitle.Render("LIVE") + "\n" + body) + "\n")
+		b.WriteString(box(m.width, "LIVE", body) + "\n")
 	}
 
 	b.WriteString(dim.Render("↑↓ move · enter details · a approve · ? help · q quit"))
@@ -843,20 +860,35 @@ func readSnapshot(root string, width int) snapshot {
 		}
 	}
 
+	// open MRs — mr-* files fresher than an hour (stale ones are closed MRs
+	// or a stopped daemon; either way not "current")
 	mrFiles, _ := filepath.Glob(filepath.Join(root, "state", "mr-*"))
-	sort.Strings(mrFiles)
 	for _, f := range mrFiles {
+		if st, err := os.Stat(f); err != nil || now.Sub(st.ModTime()) > time.Hour {
+			continue
+		}
 		data, err := os.ReadFile(f)
 		if err != nil {
 			continue
 		}
-		st := strings.Fields(string(data))
-		status := "unknown"
-		if len(st) > 0 {
-			status = st[0]
+		fields := strings.Fields(string(data))
+		mr := mrState{iid: strings.TrimPrefix(filepath.Base(f), "mr-"), status: "unknown"}
+		if len(fields) > 0 {
+			mr.status = fields[0]
 		}
-		s.mrs = append(s.mrs, mrState{iid: strings.TrimPrefix(filepath.Base(f), "mr-"), status: status})
+		if len(fields) > 3 {
+			mr.src, mr.tgt = fields[2], fields[3]
+		}
+		if len(fields) > 4 {
+			mr.title = strings.Join(fields[4:], " ")
+		}
+		s.mrs = append(s.mrs, mr)
 	}
+	sort.Slice(s.mrs, func(i, j int) bool {
+		a, _ := strconv.Atoi(s.mrs[i].iid)
+		b, _ := strconv.Atoi(s.mrs[j].iid)
+		return a > b
+	})
 	return s
 }
 
@@ -931,6 +963,13 @@ func nonEmpty(in []string) []string {
 
 func max(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
