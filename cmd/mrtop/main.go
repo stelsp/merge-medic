@@ -89,6 +89,7 @@ type snapshot struct {
 	ok, bad, esc         int
 	tok, tbad, tesc      int
 	tclean, tai          int
+	radar                []string // brewing MR-vs-MR conflict pairs
 	feed                 []string // pre-rendered live feed lines, oldest first
 	daily                []int    // DONE per day, last 14 days, oldest first
 	spendToday, spend    float64  // USD, from the CLI's own accounting
@@ -358,6 +359,15 @@ func (m model) renderTimeline(it item) string {
 
 var orbit = []rune("◐◓◑◒")
 
+// mrsRadar renders the brewing-conflict warnings for the ACTIVE box.
+func (m model) mrsRadar(aw int) []string {
+	var out []string
+	for _, r := range m.snap.radar {
+		out = append(out, yellow.Render(" ⚡ "+trunc(r, aw-4)))
+	}
+	return out
+}
+
 func (m model) renderBanner() string {
 	return " ▄█▄\n" +
 		" ▀█▀  " + bold.Render("merge-medic") + "\n"
@@ -492,6 +502,7 @@ func (m model) View() string {
 				tstyle.Render(trunc(title, aw-(15+bcol)))))
 		}
 	}
+	act = append(act, m.mrsRadar(aw)...)
 	if len(act) == 0 {
 		act = append(act, dim.Render(" no open MRs"))
 	}
@@ -906,6 +917,16 @@ func readSnapshot(root string, width int) snapshot {
 			age := int((day0 + 86400 - ts) / 86400) // 0 = today
 			if age >= 0 && age < 14 {
 				s.daily[13-age]++
+			}
+		}
+	}
+
+	// brewing conflicts between open MRs (state/radar: a|b|srcA|srcB)
+	if data, err := os.ReadFile(filepath.Join(root, "state", "radar")); err == nil {
+		for _, ln := range nonEmpty(strings.Split(string(data), "\n")) {
+			p := strings.Split(ln, "|")
+			if len(p) >= 4 {
+				s.radar = append(s.radar, fmt.Sprintf("!%s × !%s  %s ↔ %s", p[0], p[1], p[2], p[3]))
 			}
 		}
 	}
