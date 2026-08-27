@@ -90,6 +90,8 @@ type snapshot struct {
 	tclean, tai          int
 	feed                 []string // pre-rendered live feed lines, oldest first
 	daily                []int    // DONE per day, last 14 days, oldest first
+	spendToday, spend    float64  // USD, from the CLI's own accounting
+	modelLine            string   // per-model tokens/cost breakdown
 }
 
 type tickMsg time.Time
@@ -390,9 +392,13 @@ func (m model) View() string {
 		s.tclean, s.tai))
 	bmax, _ := strconv.Atoi(s.budgetMax)
 	bcur, _ := strconv.Atoi(s.budget)
-	b.WriteString(fmt.Sprintf("%s %s %s/%s · %s %s 14d\n",
+	b.WriteString(fmt.Sprintf("%s %s %s/%s · %s %s 14d · %s ≈$%.2f today / $%.2f all\n",
 		dim.Render("ai-budget"), yellow.Render(gauge(bcur, bmax, 10)), s.budget, s.budgetMax,
-		dim.Render("activity"), green.Render(sparkline(s.daily))))
+		dim.Render("activity"), green.Render(sparkline(s.daily)),
+		dim.Render("spend"), s.spendToday, s.spend))
+	if s.modelLine != "" {
+		b.WriteString(dim.Render("tokens "+s.modelLine) + "\n")
+	}
 
 	idx := 0
 	var act []string
@@ -547,6 +553,62 @@ func buildFeed(root string, width int) []string {
 		out = out[len(out)-300:]
 	}
 	return out
+}
+
+func fmtTok(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.0fk", float64(n)/1e3)
+	}
+	return strconv.FormatInt(n, 10)
+}
+
+// readTokens aggregates state/tokens.log (ts|iid|model|in|out|cache|cost).
+func readTokens(root string, day0 int64) (today, total float64, modelLine string) {
+	data, err := os.ReadFile(filepath.Join(root, "state", "tokens.log"))
+	if err != nil {
+		return 0, 0, ""
+	}
+	type agg struct{ in, out int64; cost float64 }
+	models := map[string]*agg{}
+	var order []string
+	for _, ln := range nonEmpty(strings.Split(string(data), "\n")) {
+		p := strings.Split(ln, "|")
+		if len(p) < 7 {
+			continue
+		}
+		ts, _ := strconv.ParseInt(p[0], 10, 64)
+		in, _ := strconv.ParseInt(p[3], 10, 64)
+		out, _ := strconv.ParseInt(p[4], 10, 64)
+		cost, _ := strconv.ParseFloat(p[6], 64)
+		total += cost
+		if ts >= day0 {
+			today += cost
+		}
+		m := p[2]
+		if models[m] == nil {
+			models[m] = &agg{}
+			order = append(order, m)
+		}
+		models[m].in += in
+		models[m].out += out
+		models[m].cost += cost
+	}
+	var parts []string
+	for _, m := range order {
+		a := models[m]
+		short := m
+		if i := strings.Index(short, "claude-"); i >= 0 {
+			short = short[i+7:]
+		}
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		parts = append(parts, fmt.Sprintf("%s %s→%s $%.2f", short, fmtTok(a.in), fmtTok(a.out), a.cost))
+	}
+	return today, total, strings.Join(parts, " · ")
 }
 
 var sparkChars = []rune("▁▂▃▄▅▆▇█")
@@ -711,6 +773,7 @@ func readSnapshot(root string, width int) snapshot {
 	}
 
 	s.feed = buildFeed(root, width)
+	s.spendToday, s.spend, s.modelLine = readTokens(root, day0)
 
 	// DONE per day for the last 14 days (activity sparkline)
 	s.daily = make([]int, 14)

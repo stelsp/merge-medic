@@ -82,6 +82,21 @@ post_note() {
   } >> "$LOGDIR/fixer-$IID.log" 2>&1 || true
 }
 
+# Token/cost ledger: one line per model per AI call, from the CLI's own
+# usage accounting (no hardcoded price tables).
+# state/tokens.log: ts|iid|model|in|out|cache_read|cost_usd
+record_tokens() { # $1 = claude --output-format json result file
+  local rts; rts="$(date +%s)"
+  jq -r --arg ts "$rts" --arg iid "$IID" --arg m "${CLAUDE_MODEL:-unknown}" '
+    if (.modelUsage // null) != null then
+      .modelUsage | to_entries[]
+      | "\($ts)|\($iid)|\(.key)|\(.value.inputTokens // 0)|\(.value.outputTokens // 0)|\(.value.cacheReadInputTokens // 0)|\(.value.costUSD // 0)"
+    else
+      "\($ts)|\($iid)|\($m)|\(.usage.input_tokens // 0)|\(.usage.output_tokens // 0)|\(.usage.cache_read_input_tokens // 0)|\(.total_cost_usd // 0)"
+    end
+  ' "$1" >> "$ROOT/state/tokens.log" 2>/dev/null || true
+}
+
 # Human MR/PR comments newer than the plan file — corrections for the
 # approved run. Bot-authored comments (merge-medic prefix) are skipped.
 collect_feedback() { # $1 = plan file; its mtime is the cutoff
@@ -216,11 +231,15 @@ Write GitHub-flavored markdown, no preamble: a '### <file path>' heading per fil
       --allowedTools "Read Grep Glob Bash(git:*)" \
       --disallowedTools "Edit Write WebFetch WebSearch Bash(curl:*) Bash(rm:*)" \
       --add-dir "$WT" \
-      --output-format text > "$PLANFILE" 2>>"$LOGDIR/fixer-$IID.log"
+      --output-format json > "$PLANFILE.json" 2>>"$LOGDIR/fixer-$IID.log"
     prc=$?
     set -e
     git merge --abort 2>/dev/null || true
     [ "$prc" != "0" ] && fail "plan agent exited with code $prc"
+    jq -r '.result // empty' "$PLANFILE.json" > "$PLANFILE" 2>/dev/null || true
+    [ -s "$PLANFILE" ] || fail "plan agent returned no text"
+    record_tokens "$PLANFILE.json"
+    rm -f "$PLANFILE.json"
     ev PLANNED "awaiting approve (a) — plan posted to ${SIGIL}$IID"
     ledger PLANNED
     post_note "## 🩹 merge-medic — resolution plan (approval required)
@@ -279,9 +298,13 @@ Rules:
     --allowedTools "Read Edit Write Glob Grep Bash(git:*)" \
     --disallowedTools "WebFetch WebSearch Bash(curl:*) Bash(rm:*) Bash(git push:*)" \
     --add-dir "$WT" \
-    --output-format text >> "$AILOG" 2>&1
+    --output-format json > "$AILOG.json" 2>>"$AILOG"
   rc=$?
   set -e
+  # keep the human-readable resolver answer in AILOG, usage in tokens.log
+  jq -r '.result // empty' "$AILOG.json" >> "$AILOG" 2>/dev/null || true
+  record_tokens "$AILOG.json"
+  rm -f "$AILOG.json"
   if [ -f "$ESCFILE" ]; then
     reason="$(head -3 "$ESCFILE" | tr '\n' ' ')"
     git merge --abort 2>/dev/null || true
