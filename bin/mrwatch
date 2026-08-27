@@ -8,11 +8,16 @@
 #   mrwatch run         run a watcher tick right now
 #   mrwatch pause       unload the scheduler job (until resume)
 #   mrwatch resume      load the scheduler job back
+#
+# shellcheck disable=SC2012  # log names are machine-generated (ai-<iid>-<ts>.log);
+# `ls -t | head -1` is the portable newest-first pick, find has no mtime sort
 set -euo pipefail
 
 SELF="${BASH_SOURCE[0]}"
 while [ -L "$SELF" ]; do SELF="$(readlink "$SELF")"; done
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
+# shellcheck source=lib.sh
+source "$ROOT/lib.sh"
 
 INST="$(basename "$ROOT")"; INST="${INST#.}"
 LABEL="com.$INST.watch"
@@ -305,7 +310,7 @@ $(cat "$BRIEF")"         --model "${CLAUDE_MODEL:-sonnet}"         --add-dir "$R
 
     PKG=""; for p in brew apt-get dnf pacman; do command -v "$p" >/dev/null 2>&1 && { PKG="$p"; break; }; done
 
-    cfgget() { sed -n "s/^$1=[\"']\{0,1\}\([^\"']*\).*/\1/p" "$cfg" | head -1; }
+    cfgget() { mm_cfg_get "$cfg" "$1"; }
     cfgset() { # key value  (values with double quotes are not supported)
       local tmp; tmp="$(mktemp)"
       if grep -q "^$1=" "$cfg"; then

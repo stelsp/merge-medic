@@ -102,11 +102,8 @@ consider() {
 
   # routing: AUTO_BRANCHES sources are fixed fully automatically; everything
   # else runs the semi-auto plan -> human approve -> fix flow
-  local mode="plan" ab
-  for ab in ${AUTO_BRANCHES:-feat-*}; do
-    # shellcheck disable=SC2254
-    case "$src" in $ab) mode="auto";; esac
-  done
+  local mode="plan"
+  mm_src_is_auto "$src" && mode="auto"
   # an approve marker upgrades ANY mode to fix-approved — it also unblocks
   # escalated auto-branch MRs after the human answered the bot's questions
   if [ -f "$STATE/approve-$iid" ]; then
@@ -136,7 +133,7 @@ consider() {
 "
 }
 
-if [ "${PROVIDER:-gitlab}" = "github" ]; then
+if mm_is_github; then
   # ── GitHub via gh ───────────────────────────────────────────────────────────
   command -v gh >/dev/null 2>&1 || { log "ERROR: PROVIDER=github but gh is not installed"; exit 1; }
   prs="$(gh pr list --repo "$PROJECT_PATH" --state open --limit 100 \
@@ -224,7 +221,7 @@ radar_scan() {
     iid="${f##*/mr-}"
     # shellcheck disable=SC2034  # shas/rest are placeholders for unused fields
     read -r status shas src tgt rest < "$f" || continue
-    [ -n "$src" ] && [ -n "$tgt" ] || continue
+    if [ -z "$src" ] || [ -z "$tgt" ]; then continue; fi
     list+="$iid $src $tgt
 "
   done
@@ -240,6 +237,7 @@ radar_scan() {
     [ -z "$a_iid" ] && continue
     while IFS=' ' read -r b_iid b_src b_tgt; do
       [ -z "$b_iid" ] && continue
+      # numeric a<b keeps each pair once; malformed ids fail the test → skipped
       [ "$a_iid" -lt "$b_iid" ] 2>/dev/null || continue
       [ "$a_tgt" = "$b_tgt" ] || continue
       pairs=$((pairs+1)); [ "$pairs" -gt 30 ] && break 2
@@ -276,18 +274,24 @@ if [ "$lim" -gt 0 ] && [ "$spent" -ge "$lim" ]; then
   log "daily AI budget exhausted — skipping"; exit 0
 fi
 
-# herestring (not a pipe): $( ) strips the final \n and `read` would lose the
-# last record — and with it the "already tried" mark, i.e. an eternal retry.
 targets="$(printf '%s' "$targets" | head -n "$MAX_MRS_PER_RUN")"
+# Every $targets loop below reads via `<<<` herestring, NOT `printf | while`:
+# a pipe would also work, but $( ) above already stripped the final \n and a
+# piped `read` would then lose the last record — and with it the "already
+# tried" mark, i.e. an eternal retry.
 while IFS=$'\t' read -r iid src tgt mode _; do
   [ -n "$iid" ] && log "  -> $SIGIL$iid  $src -> $tgt  [$mode]"
 done <<<"$targets"
+
+# mark_tried records the (source,target) sha pair the fixer is about to work
+# on — the dedup key that stops retry loops on crashes.
+mark_tried() { cut -d' ' -f2 "$STATE/mr-$1" > "$STATE/$MARK-$1" 2>/dev/null || true; }
 
 if [ "${DRY_RUN:-1}" = "1" ]; then
   log "DRY_RUN=1 — not merging or pushing anything"
   while IFS=$'\t' read -r iid _ _ _; do
     [ -z "$iid" ] && continue
-    cut -d' ' -f2 "$STATE/mr-$iid" > "$STATE/$MARK-$iid" 2>/dev/null || true
+    mark_tried "$iid"
   done <<<"$targets"
   exit 0
 fi
@@ -303,7 +307,7 @@ git -C "$WATCH_REPO" fetch --prune --quiet origin >>"$LOG" 2>&1 || {
 # ── mark pairs as tried BEFORE launching (no retry loops on crashes) ──────────
 while IFS=$'\t' read -r iid _ _ _; do
   [ -z "$iid" ] && continue
-  cut -d' ' -f2 "$STATE/mr-$iid" > "$STATE/$MARK-$iid" 2>/dev/null || true
+  mark_tried "$iid"
 done <<<"$targets"
 
 # ── launch fixers (fix-mr.sh, one per MR; cap PARALLEL_FIXERS) ────────────────

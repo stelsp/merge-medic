@@ -71,7 +71,7 @@ post_note() {
   [ "${POST_RESOLUTION_NOTE:-0}" = "1" ] || return 0
   local body="$1"
   {
-    if [ "${PROVIDER:-gitlab}" = "github" ]; then
+    if mm_is_github; then
       gh pr comment "$IID" --repo "$PROJECT_PATH" --body "$body" \
         || echo "post_note: gh pr comment failed (exit $?)"
     else
@@ -156,7 +156,7 @@ resolver_call() {
 
 # mr_author prints the MR/PR author's username (the default trusted commenter).
 mr_author() {
-  if [ "${PROVIDER:-gitlab}" = "github" ]; then
+  if mm_is_github; then
     gh pr view "$IID" --repo "$PROJECT_PATH" --json author --jq '.author.login' 2>/dev/null || true
   else
     ( cd "$WT" 2>/dev/null || cd "$WATCH_REPO"
@@ -177,7 +177,7 @@ collect_feedback() { # $1 = plan file; its mtime is the cutoff
   [ -z "$trusted" ] && return 0   # cannot establish trust — read nobody
   # shellcheck disable=SC2086
   allowed_json="$(printf '%s\n' $trusted | jq -R . | jq -cs .)"
-  if [ "${PROVIDER:-gitlab}" = "github" ]; then
+  if mm_is_github; then
     gh pr view "$IID" --repo "$PROJECT_PATH" --json comments 2>/dev/null \
       | jq -r --argjson t "$cutoff" --argjson ok "$allowed_json" '[.comments[] | select([.author.login] | inside($ok)) | select(.body | test("^(## .? ?merge-medic|merge-medic)") | not) | select((.createdAt | fromdateiso8601) > $t) | "- " + .body] | join("\n")' 2>/dev/null || true
   else
@@ -192,10 +192,7 @@ ev START "$SRC -> $TGT"
 
 # ── push guard: non-AUTO branches are only ever pushed by an approved run ─────
 src_is_auto=0
-for ab in ${AUTO_BRANCHES:-feat-*}; do
-  # shellcheck disable=SC2254
-  case "$SRC" in $ab) src_is_auto=1;; esac
-done
+mm_src_is_auto "$SRC" && src_is_auto=1
 if [ "$src_is_auto" = "0" ] && [ "$MODE" != "plan" ] && [ "$MODE" != "fix-approved" ]; then
   fail "source branch '$SRC' is not in AUTO_BRANCHES and no approve exists"
 fi
@@ -430,10 +427,13 @@ $(cat "$ROOT/state/esc-$IID.md")
   fi
   [ "$rc" != "0" ] && fail "resolver exited with code $rc (log: ${AILOG##*/})"
   [ -n "$(git diff --name-only --diff-filter=U)" ] && fail "unresolved files remain"
-  # shellcheck disable=SC2086
-  if grep -rl '^<<<<<<< ' $conflicts 2>/dev/null | head -1 | grep -q .; then
-    fail "conflict markers remain"
-  fi
+  # per-file loop (not an unquoted $conflicts expansion): survives spaces in paths
+  markers_left=0
+  while IFS= read -r cf; do
+    [ -n "$cf" ] || continue
+    grep -q '^<<<<<<< ' "$cf" 2>/dev/null && { markers_left=1; break; }
+  done <<<"$conflicts"
+  [ "$markers_left" = "1" ] && fail "conflict markers remain"
   rm -f "$ESCFILE"
   # capture the AI's summary BEFORE staging so it never lands in the commit
   [ -f "$SUMFILE" ] && summary="$(cat "$SUMFILE")" && rm -f "$SUMFILE"
@@ -472,7 +472,7 @@ if [ "${PUSH_MODE:-direct}" = "mr" ]; then
   git push origin "HEAD:refs/heads/$FIXBR" >/dev/null 2>&1 || fail "push of $FIXBR rejected"
   res_title="merge-medic: resolve conflicts of ${SIGIL}$IID ($SRC <- $TGT)"
   res_body="Automated conflict resolution for ${SIGIL}$IID. Merge this into \`$SRC\` to clear the conflict — your branch is untouched until you do."
-  if [ "${PROVIDER:-gitlab}" = "github" ]; then
+  if mm_is_github; then
     res_link="$(gh pr create --repo "$PROJECT_PATH" --head "$FIXBR" --base "$SRC" \
       --title "$res_title" --body "$res_body" 2>>"$LOGDIR/fixer-$IID.log" || true)"
   else
