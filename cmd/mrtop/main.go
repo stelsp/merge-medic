@@ -57,11 +57,12 @@ var phases = map[string]phaseInfo{
 	"FAIL":        {100, 100, 1},
 	"ESCALATED":   {100, 100, 1},
 	"PLANNED":     {100, 100, 1},
+	"DEFERRED":    {0, 0, 1},
 }
 
 func terminal(phase string) bool {
 	switch phase {
-	case "DONE", "FAIL", "ESCALATED", "PLANNED":
+	case "DONE", "FAIL", "ESCALATED", "PLANNED", "DEFERRED":
 		return true
 	}
 	return false
@@ -216,6 +217,8 @@ func outcomeMark(phase string) string {
 		return yellow.Render("⚑")
 	case "PLANNED":
 		return yellow.Render("▣")
+	case "DEFERRED":
+		return dim.Render("…")
 	}
 	return " "
 }
@@ -245,6 +248,8 @@ func (m model) renderRow(it item, idx int, now int64, aw int) string {
 		style = red
 	case "AI_RESOLVE", "PLAN", "PLANNED", "ESCALATED":
 		style = yellow
+	case "DEFERRED":
+		style = dim
 	}
 	when := time.Unix(it.t0, 0).Format("15:04")
 	tag := it.mode
@@ -782,7 +787,7 @@ func readSnapshot(root string, width int) snapshot {
 		it.active = true
 		// terminal runs land in HISTORY via the ledger; PLANNED still needs
 		// action, so it stays in ACTIVE as a waiter
-		if terminal(it.phase) && it.phase != "PLANNED" {
+		if terminal(it.phase) && it.phase != "PLANNED" && it.phase != "DEFERRED" {
 			continue
 		}
 		s.activeRows = append(s.activeRows, it)
