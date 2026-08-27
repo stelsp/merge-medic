@@ -172,6 +172,8 @@ type model struct {
 	showHelp bool
 	screen   int // 0 = main, 1 = insights, 2 = fleet
 	selF     int // fleet cursor
+	lastFeed string // newest feed line, for the typewriter effect
+	typeK    int    // typed width of the newest feed line
 }
 
 func main() {
@@ -184,7 +186,8 @@ func main() {
 		if c, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && c > 40 {
 			m.width = c
 		}
-		m.frame = 100 // full banner name in snapshots
+		m.frame = 100  // full banner name in snapshots
+		m.typeK = 1 << 20 // no mid-typing line in snapshots
 
 		m.snap = readSnapshot(m.root, m.width)
 		fmt.Println(m.View())
@@ -295,6 +298,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showLog {
 			if r, ok := m.selected(); ok {
 				m.logName, m.logLines = readLog(m.root, r.iid())
+			}
+		}
+		if n := len(m.snap.feed); n > 0 {
+			if m.snap.feed[n-1] != m.lastFeed {
+				m.lastFeed = m.snap.feed[n-1]
+				m.typeK = 0 // a fresh line starts typing itself
+			} else {
+				m.typeK += 8
 			}
 		}
 		m.frame++
@@ -737,15 +748,6 @@ func (m model) View() string {
 	if bmax == 0 {
 		budgetLine = fmt.Sprintf("%s %s today · %s %s", dim.Render("ai-budget"), s.budget, green.Render("∞ unlimited"), dim.Render("+/-"))
 	}
-	tickLine := dim.Render("tick   never seen")
-	if s.lastTick > 0 {
-		agoS := now - s.lastTick
-		st := green
-		if agoS > 600 {
-			st = red // two+ missed polls — the daemon is probably wedged
-		}
-		tickLine = dim.Render("tick   ") + st.Render(fmtAge(agoS)+" ago")
-	}
 	pm := green.Render("direct push")
 	if s.pushMode == "mr" {
 		pm = yellow.Render("via resolution MR")
@@ -755,7 +757,6 @@ func (m model) View() string {
 			time.Now().Format("15:04:05"), d),
 		budgetLine,
 		dim.Render("deliver ") + pm + " " + dim.Render("m"),
-		tickLine,
 	}
 	if s.lastErr != "" {
 		statusLines = append(statusLines, red.Render("⚠ "+s.lastErr))
@@ -969,7 +970,30 @@ func (m model) View() string {
 		}
 		feedH := total - 3
 		badge := "▼ follow"
-		body := strings.Join(s.feed, "\n")
+		ival, _ := strconv.Atoi(readConfigVal(m.root, "POLL_INTERVAL", "180"))
+		if ival <= 0 {
+			ival = 180
+		}
+		if s.lastTick > 0 {
+			left := s.lastTick + int64(ival) - now
+			switch {
+			case left >= 0:
+				badge += fmt.Sprintf(" · next tick %02d:%02d", left/60, left%60)
+			case -left > int64(ival):
+				badge += " · " + "LATE " + fmtAge(-left)
+			default:
+				badge += " · tick due…"
+			}
+		}
+		feed := s.feed
+		if len(feed) > 0 && m.liveOff == 0 {
+			last := feed[len(feed)-1]
+			if lw := lipgloss.Width(last); m.typeK < lw {
+				feed = append(append([]string{}, feed[:len(feed)-1]...),
+					truncate.String(last, uint(max(0, m.typeK)))+amber.Render("▌"))
+			}
+		}
+		body := strings.Join(feed, "\n")
 		if body == "" {
 			body = dim.Render(" quiet — waiting for events")
 		} else {
@@ -997,7 +1021,15 @@ func (m model) View() string {
 		used := lipgloss.Height(b.String())
 		feedH := m.height - used - 4
 		if feedH >= 3 {
-			body := strings.Join(s.feed, "\n")
+			feed := s.feed
+			if len(feed) > 0 && m.liveOff == 0 {
+				last := feed[len(feed)-1]
+				if lw := lipgloss.Width(last); m.typeK < lw {
+					feed = append(append([]string{}, feed[:len(feed)-1]...),
+						truncate.String(last, uint(max(0, m.typeK)))+amber.Render("▌"))
+				}
+			}
+			body := strings.Join(feed, "\n")
 			if body == "" {
 				body = dim.Render(" quiet — waiting for events")
 			} else {

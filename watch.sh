@@ -61,6 +61,7 @@ spent="$(cat "$BUDGET_FILE")"
 
 # ── pick conflicted MRs/PRs not yet tried ─────────────────────────────────────
 targets=""   # iid<TAB>source<TAB>target<TAB>title
+N_OPEN=0; N_CONF=0
 verbose=0
 SIGIL="$(mm_ref_sigil)"
 
@@ -68,6 +69,8 @@ SIGIL="$(mm_ref_sigil)"
 consider() {
   local iid="$1" src="$2" tgt="$3" title="$4" draft="$5" status="$6" ssha="$7" tsha="$8" ci="${9:-none}" author="${10:-?}" upd="${11:-?}"
   local seen_file="$STATE/mr-$iid" prev_status
+  N_OPEN=$((N_OPEN + 1))
+  [ "$status" = "conflict" ] && N_CONF=$((N_CONF + 1))
   prev_status="$(cut -d' ' -f1 "$seen_file" 2>/dev/null || echo 'none')"
   # status shas src tgt ci author updated title — for the dashboard
   echo "$status $ssha:$tsha $src $tgt $ci $author $upd $title" > "$seen_file"
@@ -242,7 +245,11 @@ radar_scan() {
 radar_scan
 
 if [ -z "$targets" ]; then
-  [ "$verbose" = "1" ] && log "no new conflicts to fix"
+  if [ "$verbose" = "1" ]; then
+    log "no new conflicts to fix"
+  else
+    log "tick: $N_OPEN open, $N_CONF conflicted — nothing new"
+  fi
   exit 0
 fi
 
