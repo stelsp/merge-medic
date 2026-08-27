@@ -21,6 +21,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/truncate"
 )
 
 // Night-shift ops console: sharp single borders, one amber accent for
@@ -348,6 +349,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
 				_ = c.Start()
 			}
+		case "+", "=":
+			cur, _ := strconv.Atoi(m.snap.budgetMax)
+			cur++
+			setConfigVal(m.root, "DAILY_AGENT_RUNS", strconv.Itoa(cur))
+			m.snap.budgetMax = strconv.Itoa(cur)
+		case "-":
+			cur, _ := strconv.Atoi(m.snap.budgetMax)
+			cur--
+			if cur < 0 {
+				cur = 0 // 0 = unlimited
+			}
+			setConfigVal(m.root, "DAILY_AGENT_RUNS", strconv.Itoa(cur))
+			m.snap.budgetMax = strconv.Itoa(cur)
 		case "r":
 			c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
 			_ = c.Start()
@@ -598,7 +612,7 @@ func (m model) renderBanner() string {
 		cur = " "
 	}
 	return " ▄█▄\n" +
-		" ▀█▀  " + bold.Render(name[:k]) + cur + "\n"
+		" ▀█▀    " + bold.Render(name[:k]) + cur + "\n"
 }
 
 func (m model) View() string {
@@ -636,9 +650,9 @@ func (m model) View() string {
 
 	bmax, _ := strconv.Atoi(s.budgetMax)
 	bcur, _ := strconv.Atoi(s.budget)
-	budgetLine := fmt.Sprintf("%s %s %s/%s", dim.Render("ai-budget"), yellow.Render(gauge(bcur, bmax, 12)), s.budget, s.budgetMax)
+	budgetLine := fmt.Sprintf("%s %s %s/%s %s", dim.Render("ai-budget"), yellow.Render(gauge(bcur, bmax, 12)), s.budget, s.budgetMax, dim.Render("+/-"))
 	if bmax == 0 {
-		budgetLine = fmt.Sprintf("%s %s today · %s", dim.Render("ai-budget"), s.budget, green.Render("∞ unlimited"))
+		budgetLine = fmt.Sprintf("%s %s today · %s %s", dim.Render("ai-budget"), s.budget, green.Render("∞ unlimited"), dim.Render("+/-"))
 	}
 	statusLines := []string{
 		fmt.Sprintf("%s %s · daemon %s", amber.Render(string(orbit[m.frame%len(orbit)])),
@@ -666,13 +680,19 @@ func (m model) View() string {
 		w2 := (lw - w1) / 2
 		w3 := lw - w1 - w2
 		h := max(len(statusLines), max(len(runLines), len(spendLines)))
-		boxH := func(w int, title, body string) string {
-			return titledBox(w, title, "", body, h, false)
+		boxH := func(w int, title string, lines []string) string {
+			// clip (ANSI-aware) instead of letting lipgloss wrap — a wrapped
+			// line would inflate one box past the shared height
+			clipped := make([]string, len(lines))
+			for i, ln := range lines {
+				clipped[i] = truncate.String(ln, uint(max(1, w-4)))
+			}
+			return titledBox(w, title, "", strings.Join(clipped, "\n"), h, false)
 		}
 		lb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top,
-			boxH(w1, "STATUS", strings.Join(statusLines, "\n")),
-			boxH(w2, "RUNS", strings.Join(runLines, "\n")),
-			boxH(w3, "SPEND", strings.Join(spendLines, "\n"))) + "\n")
+			boxH(w1, "STATUS", statusLines),
+			boxH(w2, "RUNS", runLines),
+			boxH(w3, "SPEND", spendLines)) + "\n")
 	} else {
 		all := append(append(statusLines, runLines...), spendLines...)
 		lb.WriteString(box(lw, "STATUS", strings.Join(all, "\n")) + "\n")
@@ -845,6 +865,7 @@ func (m model) helpView() string {
 		{"enter / e", "details: phase timeline (runs) / MR info + clashes (MRs)"},
 		{"o", "open the selected MR/PR in the browser"},
 		{"tab", "cycle focus: ACTIVE → HISTORY → LIVE (j/k scrolls the log)"},
+		{"+ / -", "raise / lower the daily AI budget (0 = unlimited); saved to config.env"},
 		{"l", "toggle AI/fixer log panel for the selected MR"},
 		{"a", "approve the selected PLANNED plan (semi-auto branches)"},
 		{"r", "force a watcher tick now"},
@@ -1309,6 +1330,31 @@ func readLog(root, iid string) (string, []string) {
 		lines = lines[len(lines)-12:]
 	}
 	return filepath.Base(newest), lines
+}
+
+// setConfigVal rewrites (or appends) KEY=value in config.env, atomically.
+func setConfigVal(root, key, val string) {
+	path := filepath.Join(root, "config.env")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, ln := range lines {
+		if strings.HasPrefix(strings.TrimSpace(ln), key+"=") {
+			lines[i] = key + "=" + val
+			found = true
+			break
+		}
+	}
+	if !found {
+		lines = append(lines, key+"="+val)
+	}
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, []byte(strings.Join(lines, "\n")), 0o644) == nil {
+		_ = os.Rename(tmp, path)
+	}
 }
 
 // readConfigVal extracts a KEY=value from config.env without sourcing it.
