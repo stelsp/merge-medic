@@ -2,6 +2,7 @@
 # mrwatch — console interface to merge-medic.
 #   mrwatch             status: daemon, mode, budget, fixers, MR states
 #   mrwatch top         live dashboard: per-fixer phase progress bars (q quits)
+#   mrwatch live        merged real-time event stream for a second terminal
 #   mrwatch log [-f]    tail watch.log (-f = follow)
 #   mrwatch agent [iid] tail the AI resolver log (latest, or for MR <iid>)
 #   mrwatch mrs         live GitLab poll: mergeability of all open MRs
@@ -202,11 +203,11 @@ case "$cmd" in
       printf "%b" "$out"
       read -r -t 1 -n 1 key 2>/dev/null || true
       case "${key:-}" in
-        q|й) tput cnorm 2>/dev/null; exit 0 ;;
-        l|д) LOGP=$((1 - LOGP)) ;;
-        r|к) nohup bash "$ROOT/watch.sh" >/dev/null 2>&1 & ;;
-        p|з) if daemon_loaded; then "$0" pause >/dev/null; else "$0" resume >/dev/null; fi ;;
-        a|ф)
+        q) tput cnorm 2>/dev/null; exit 0 ;;
+        l) LOGP=$((1 - LOGP)) ;;
+        r) nohup bash "$ROOT/watch.sh" >/dev/null 2>&1 & ;;
+        p) if daemon_loaded; then "$0" pause >/dev/null; else "$0" resume >/dev/null; fi ;;
+        a)
           # approve the first PLANNED fixer: next tick re-runs it for real
           for pp in "$ROOT"/state/progress-*.log; do
             [ -e "$pp" ] || continue
@@ -220,6 +221,38 @@ case "$cmd" in
           done ;;
       esac
     done
+    ;;
+
+  live)
+    # merged real-time stream: watcher lines + every fixer phase event.
+    # Meant to run forever in its own terminal window next to `mrwatch top`.
+    touch "$ROOT/logs/watch.log" "$ROOT/logs/events.log"
+    echo "${B}merge-medic — live event stream${N} ${DIM}(Ctrl-C to quit)${N}"
+    src=""
+    tail -n 30 -F "$ROOT/logs/watch.log" "$ROOT/logs/events.log" 2>/dev/null \
+    | while IFS= read -r line; do
+        case "$line" in
+          "==> "*watch.log*"<==")  src="watch";  continue ;;
+          "==> "*events.log*"<==") src="events"; continue ;;
+          "") continue ;;
+        esac
+        if [ "$src" = "events" ]; then
+          ets="${line%%|*}"; rest="${line#*|}"
+          eiid="${rest%%|*}"; rest="${rest#*|}"
+          ephase="${rest%%|*}"; edetail="${rest#*|}"
+          [ "$edetail" = "$ephase" ] && edetail=""
+          case "$ephase" in
+            DONE) c="$GRN";; FAIL) c="$RED";;
+            AI_RESOLVE|PLAN|PLANNED|ESCALATED) c="$YLW";;
+            *) c="";;
+          esac
+          t="$(date -r "$ets" '+%H:%M:%S' 2>/dev/null || date -d "@$ets" '+%H:%M:%S' 2>/dev/null || echo '??:??:??')"
+          printf '%s %s %s%-11s%s %s\n' "${DIM}$t${N}" "${B}!$eiid${N}" "$c" "$ephase" "$N" "${DIM}$edetail${N}"
+        else
+          # watch.log lines already carry a timestamp — show date part dimmed
+          printf '%s\n' "${DIM}${line}${N}"
+        fi
+      done
     ;;
 
   log)

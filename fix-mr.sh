@@ -24,7 +24,13 @@ WT="$ROOT/worktrees/wt-$IID"
 ESCFILE=".merge-medic-escalate"
 SUMFILE=".merge-medic-summary"
 
-ev() { printf '%s|%s|%s\n' "$(date +%s)" "$1" "${2:-}" >> "$PROG"; }
+# Phase event: per-run progress file (dashboards) + the shared events stream
+# (`mrwatch live` tails it in a separate terminal).
+ev() {
+  local ets; ets="$(date +%s)"
+  printf '%s|%s|%s\n' "$ets" "$1" "${2:-}" >> "$PROG"
+  printf '%s|%s|%s|%s\n' "$ets" "$IID" "$1" "${2:-}" >> "$LOGDIR/events.log"
+}
 notify() { mm_notify "$@"; }
 cleanup_wt() { git -C "$WATCH_REPO" worktree remove --force "$WT" 2>/dev/null || true; }
 # Durable all-time ledger (progress files get overwritten per run):
