@@ -6,6 +6,7 @@
 #   mrwatch log [-f]    tail watch.log (-f = follow)
 #   mrwatch agent [iid] tail the AI resolver log (latest, or for MR <iid>)
 #   mrwatch mrs         live GitLab poll: mergeability of all open MRs
+#   mrwatch setup       interactive first-run helper: deps, logins, config
 #   mrwatch run         run a watcher tick right now
 #   mrwatch pause       unload the launchd job (until resume)
 #   mrwatch resume      load the launchd job back
@@ -301,6 +302,127 @@ case "$cmd" in
           [ "${PROVIDER:-gitlab}" = "github" ] && s='#' || s='!'
           printf "  %s%-4s ${c}%-22s${N} %s -> %s  ${DIM}%s${N}\n" "$s" "$iid" "$st" "$src" "$tgt" "${title:0:50}"
         done
+    ;;
+
+  setup)
+    # Interactive first-run helper: dependencies (offers to install them),
+    # forge + resolver logins, the essential config values, the scheduler.
+    cfg="$ROOT/config.env"
+    [ -f "$cfg" ] || cp "$ROOT/config.example.env" "$cfg"
+    echo "${B}merge-medic setup${N} — deps, logins, config. Ctrl-C anytime; re-run safely."
+
+    PKG=""; for p in brew apt-get dnf pacman; do command -v "$p" >/dev/null 2>&1 && { PKG="$p"; break; }; done
+
+    cfgget() { sed -n "s/^$1=[\"']\{0,1\}\([^\"']*\).*/\1/p" "$cfg" | head -1; }
+    cfgset() { # key value  (values with double quotes are not supported)
+      local tmp; tmp="$(mktemp)"
+      if grep -q "^$1=" "$cfg"; then
+        awk -v k="$1" -v v="$2" '$0 ~ "^"k"=" {print k"=\""v"\""; next} {print}' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+      else
+        rm -f "$tmp"; printf '%s="%s"\n' "$1" "$2" >> "$cfg"
+      fi
+    }
+    ask() { read -rp "$1 [$2]: " REPLY; REPLY="${REPLY:-$2}"; }
+    inst() { # ensure a tool exists; offer to install via the local pkg manager
+      command -v "$1" >/dev/null 2>&1 && { echo "  ${GRN}✓${N} $1"; return 0; }
+      local cmd=""
+      case "$1:$PKG" in
+        glab:brew) cmd="brew install glab";;
+        glab:dnf) cmd="sudo dnf install -y glab";;
+        glab:pacman) cmd="sudo pacman -S --noconfirm glab";;
+        gh:brew) cmd="brew install gh";;
+        gh:apt-get) cmd="sudo apt-get install -y gh";;
+        gh:dnf) cmd="sudo dnf install -y gh";;
+        gh:pacman) cmd="sudo pacman -S --noconfirm github-cli";;
+        jq:brew) cmd="brew install jq";;
+        jq:apt-get) cmd="sudo apt-get install -y jq";;
+        jq:dnf) cmd="sudo dnf install -y jq";;
+        jq:pacman) cmd="sudo pacman -S --noconfirm jq";;
+        go:brew) cmd="brew install go";;
+        go:apt-get) cmd="sudo apt-get install -y golang-go";;
+        go:dnf) cmd="sudo dnf install -y golang";;
+        go:pacman) cmd="sudo pacman -S --noconfirm go";;
+        claude:*) cmd="curl -fsSL https://claude.ai/install.sh | bash";;
+        aider:*) cmd="curl -LsSf https://aider.chat/install.sh | sh";;
+      esac
+      if [ -z "$cmd" ]; then
+        echo "  ${RED}✗${N} $1 — no recipe for your package manager, install it manually"; return 1
+      fi
+      read -rp "  ${RED}✗${N} $1 missing — install via: ${B}$cmd${N} ? [Y/n] " a
+      case "$a" in n|N) return 1;; esac
+      eval "$cmd" || { echo "  install failed — install $1 manually and re-run"; return 1; }
+      command -v "$1" >/dev/null 2>&1 && echo "  ${GRN}✓${N} $1 installed"
+    }
+
+    echo; echo "${B}1/4 forge${N}"
+    d="$(cfgget PROVIDER)"; ask "Provider (gitlab/github)" "${d:-gitlab}"
+    PROVIDER="$REPLY"; cfgset PROVIDER "$PROVIDER"
+    FCLI=glab; [ "$PROVIDER" = "github" ] && FCLI=gh
+    inst "$FCLI" || true; inst jq || true
+    d="$(cfgget PROJECT_PATH)"; ask "Project (group/project or owner/repo)" "${d:-group/project}"
+    PP="$REPLY"; cfgset PROJECT_PATH "$PP"
+    if [ "$PROVIDER" = "gitlab" ]; then
+      d="$(cfgget GITLAB_HOST)"; ask "GitLab host" "${d:-gitlab.example.com}"
+      GLHOST="$REPLY"; cfgset GITLAB_HOST "$GLHOST"
+      d="$(cfgget GIT_REMOTE_URL)"; ask "Git remote URL" "${d:-git@$GLHOST:$PP.git}"
+      cfgset GIT_REMOTE_URL "$REPLY"
+      if command -v glab >/dev/null 2>&1; then
+        if GITLAB_HOST="$GLHOST" glab auth status 2>&1 | grep -q "Logged in"; then
+          echo "  ${GRN}✓${N} glab logged in"
+        else
+          echo "  → glab is not logged in to $GLHOST — starting login:"
+          glab auth login --hostname "$GLHOST" || true
+        fi
+      fi
+    else
+      cfgset GIT_REMOTE_URL "git@github.com:$PP.git"
+      if command -v gh >/dev/null 2>&1; then
+        if gh auth status >/dev/null 2>&1; then echo "  ${GRN}✓${N} gh logged in"
+        else echo "  → gh is not logged in — starting login:"; gh auth login || true; fi
+      fi
+    fi
+
+    echo; echo "${B}2/4 resolver (the AI that edits conflicts)${N}"
+    d="$(cfgget RESOLVER)"; ask "Resolver (claude / aider = any model / custom)" "${d:-claude}"
+    R="$REPLY"; cfgset RESOLVER "$R"
+    case "$R" in
+      aider)
+        inst aider || true
+        d="$(cfgget RESOLVER_MODEL)"; ask "Model (gpt-4o / gemini\\/gemini-2.5-pro / deepseek / ollama\\/llama3 ...)" "${d:-gpt-4o}"
+        cfgset RESOLVER_MODEL "$REPLY"
+        read -rp "API key env var for that provider (e.g. OPENAI_API_KEY; empty = already set): " kv
+        if [ -n "$kv" ]; then
+          read -rsp "Value for $kv (saved into gitignored config.env): " kval; echo
+          [ -n "$kval" ] && printf 'export %s="%s"\n' "$kv" "$kval" >> "$cfg" && echo "  ${GRN}✓${N} $kv saved"
+        fi
+        ;;
+      custom)
+        d="$(cfgget RESOLVER_CMD)"; ask "RESOLVER_CMD ({prompt_file} and {mode} are substituted)" "${d:-}"
+        cfgset RESOLVER_CMD "$REPLY"
+        ;;
+      *)
+        inst claude || true
+        if command -v claude >/dev/null 2>&1; then
+          if claude auth status >/dev/null 2>&1; then echo "  ${GRN}✓${N} claude logged in"
+          else echo "  → claude is not logged in — starting login:"; claude auth login || true; fi
+        fi
+        d="$(cfgget CLAUDE_MODEL)"; ask "Claude model" "${d:-opus}"
+        cfgset CLAUDE_MODEL "$REPLY"
+        ;;
+    esac
+
+    echo; echo "${B}3/4 project gates${N}"
+    d="$(cfgget VERIFY_CMD)"; ask "Verify command (typecheck/build gate; empty = skip)" "${d:-}"
+    cfgset VERIFY_CMD "$REPLY"
+    d="$(cfgget AUTO_BRANCHES)"; ask "Auto-fix source branch globs (others get plan->approve)" "${d:-feat-*}"
+    cfgset AUTO_BRANCHES "$REPLY"
+    inst go || echo "    (no Go — the dashboard falls back to the bash version)"
+
+    echo; echo "${B}4/4 scheduler${N}"
+    read -rp "Run ./install.sh now (scheduler + mrtop build)? [Y/n] " a
+    case "$a" in n|N) ;; *) bash "$ROOT/install.sh" || true;; esac
+    echo
+    echo "${B}done${N} — DRY_RUN=$(cfgget DRY_RUN). Watch dry ticks: ${B}mrwatch log -f${N}; go live: DRY_RUN=0 in config.env; dashboard: ${B}mrwatch top${N}"
     ;;
 
   run)
