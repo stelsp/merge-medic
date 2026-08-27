@@ -64,11 +64,11 @@ SIGIL="$(mm_ref_sigil)"
 
 # Shared edge/dedup logic: called once per MR/PR with normalized fields.
 consider() {
-  local iid="$1" src="$2" tgt="$3" title="$4" draft="$5" status="$6" ssha="$7" tsha="$8" ci="${9:-none}"
+  local iid="$1" src="$2" tgt="$3" title="$4" draft="$5" status="$6" ssha="$7" tsha="$8" ci="${9:-none}" author="${10:-?}" upd="${11:-?}"
   local seen_file="$STATE/mr-$iid" prev_status
   prev_status="$(cut -d' ' -f1 "$seen_file" 2>/dev/null || echo 'none')"
-  # status shas src tgt ci title — the dashboard shows open MRs with this info
-  echo "$status $ssha:$tsha $src $tgt $ci $title" > "$seen_file"
+  # status shas src tgt ci author updated title — for the dashboard
+  echo "$status $ssha:$tsha $src $tgt $ci $author $upd $title" > "$seen_file"
 
   [ "$status" != "conflict" ] && return 0
 
@@ -133,7 +133,7 @@ if [ "${PROVIDER:-gitlab}" = "github" ]; then
   # ── GitHub via gh ───────────────────────────────────────────────────────────
   command -v gh >/dev/null 2>&1 || { log "ERROR: PROVIDER=github but gh is not installed"; exit 1; }
   prs="$(gh pr list --repo "$PROJECT_PATH" --state open --limit 100 \
-        --json number,title,headRefName,baseRefName,mergeable,isDraft,headRefOid,statusCheckRollup 2>/dev/null || echo '')"
+        --json number,title,headRefName,baseRefName,mergeable,isDraft,headRefOid,statusCheckRollup,author,updatedAt 2>/dev/null || echo '')"
   if [ -z "$prs" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$prs"; then
     log "ERROR: could not list PRs (check gh auth status)"; exit 1
   fi
@@ -157,7 +157,9 @@ if [ "${PROVIDER:-gitlab}" = "github" ]; then
     ssha="$(jq -r '.headRefOid // "?"' <<<"$row")"
     tsha="$(gh api "repos/$PROJECT_PATH/commits/$tgt" --jq .sha 2>/dev/null || echo '?')"
     ci="$(jq -r '(.statusCheckRollup // []) | map(.conclusion // .state // "") | if length==0 then "none" elif any(.=="FAILURE" or .=="ERROR" or .=="CANCELLED") then "failed" elif all(.=="SUCCESS" or .=="NEUTRAL" or .=="SKIPPED") then "success" else "running" end' <<<"$row")"
-    consider "$iid" "$src" "$tgt" "$title" "$draft" "$status" "$ssha" "$tsha" "$ci"
+    author="$(jq -r '.author.login // "?"' <<<"$row")"
+    upd="$(jq -r '.updatedAt // "?"' <<<"$row")"
+    consider "$iid" "$src" "$tgt" "$title" "$draft" "$status" "$ssha" "$tsha" "$ci" "$author" "$upd"
   done < <(jq -c '.[]' <<<"$prs")
 else
   # ── GitLab via glab ─────────────────────────────────────────────────────────
@@ -185,7 +187,9 @@ else
     ssha="$(jq -r '.sha // .diff_refs.head_sha // "?"' <<<"$mr")"
     tsha="$(jq -r '.diff_refs.base_sha // "?"' <<<"$mr")"
     ci="$(jq -r '.head_pipeline.status // "none"' <<<"$mr")"
-    consider "$iid" "$src" "$tgt" "$title" "$draft" "$status" "$ssha" "$tsha" "$ci"
+    author="$(jq -r '.author.username // "?"' <<<"$mr")"
+    upd="$(jq -r '.updated_at // "?"' <<<"$mr")"
+    consider "$iid" "$src" "$tgt" "$title" "$draft" "$status" "$ssha" "$tsha" "$ci" "$author" "$upd"
   done
 fi
 

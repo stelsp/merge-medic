@@ -79,7 +79,8 @@ type item struct {
 
 func (it item) key() string { return it.iid + "@" + strconv.FormatInt(it.t0, 10) }
 
-type mrState struct{ iid, status, src, tgt, ci, title string }
+type mrState struct{ iid, status, src, tgt, ci, author, title string
+	updated int64 }
 
 type radarPair struct{ a, b, srcA, srcB string }
 
@@ -101,10 +102,11 @@ type snapshot struct {
 type tickMsg time.Time
 
 type model struct {
-	root     string
-	snap     snapshot
-	sel      int
-	expanded map[string]bool
+	root       string
+	snap       snapshot
+	sel        int
+	expanded   map[string]bool
+	expandedMR map[string]bool
 	showLog  bool
 	logName  string
 	logLines []string
@@ -119,11 +121,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: mrtop <merge-medic root>")
 		os.Exit(2)
 	}
-	m := model{root: os.Args[1], width: 100, height: 40, expanded: map[string]bool{}}
+	m := model{root: os.Args[1], width: 100, height: 40, expanded: map[string]bool{}, expandedMR: map[string]bool{}}
 	if len(os.Args) > 2 && os.Args[2] == "--once" {
 		if c, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && c > 40 {
 			m.width = c
 		}
+		m.frame = 100 // full banner name in snapshots
+
 		m.snap = readSnapshot(m.root, m.width)
 		fmt.Println(m.View())
 		return
@@ -140,16 +144,65 @@ func tick() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-func (m model) rows() []item {
-	return append(append([]item{}, m.snap.activeRows...), m.snap.histRows...)
+// rowRef is one selectable dashboard row: a live fixer, an open MR, or a
+// finished run — in exactly the order the ACTIVE/HISTORY boxes render them.
+type rowRef struct {
+	kind string // fixer | mr | hist
+	it   item
+	mr   mrState
 }
 
-func (m model) selected() (item, bool) {
-	rows := m.rows()
+func (m model) rowRefs() []rowRef {
+	var out []rowRef
+	for _, it := range m.snap.activeRows {
+		out = append(out, rowRef{kind: "fixer", it: it})
+	}
+	for _, mr := range m.snap.mrs {
+		out = append(out, rowRef{kind: "mr", mr: mr})
+	}
+	for _, it := range m.snap.histRows {
+		out = append(out, rowRef{kind: "hist", it: it})
+	}
+	return out
+}
+
+func (m model) selected() (rowRef, bool) {
+	rows := m.rowRefs()
 	if m.sel >= 0 && m.sel < len(rows) {
 		return rows[m.sel], true
 	}
-	return item{}, false
+	return rowRef{}, false
+}
+
+func (r rowRef) iid() string {
+	if r.kind == "mr" {
+		return r.mr.iid
+	}
+	return r.it.iid
+}
+
+// webURL builds the MR/PR web address for this row from config.env values.
+func webURL(root, iid string) string {
+	pp := readConfigVal(root, "PROJECT_PATH", "")
+	if pp == "" {
+		return ""
+	}
+	if readConfigVal(root, "PROVIDER", "gitlab") == "github" {
+		return "https://github.com/" + pp + "/pull/" + iid
+	}
+	host := readConfigVal(root, "GITLAB_HOST", "gitlab.com")
+	return "https://" + host + "/" + pp + "/-/merge_requests/" + iid
+}
+
+func openInBrowser(url string) {
+	if url == "" {
+		return
+	}
+	cmd := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		cmd = "open"
+	}
+	_ = exec.Command(cmd, url).Start()
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -158,12 +211,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case tickMsg:
 		m.snap = readSnapshot(m.root, m.width)
-		if n := len(m.rows()); m.sel >= n {
+		if n := len(m.rowRefs()); m.sel >= n {
 			m.sel = max(0, n-1)
 		}
 		if m.showLog {
-			if it, ok := m.selected(); ok {
-				m.logName, m.logLines = readLog(m.root, it.iid)
+			if r, ok := m.selected(); ok {
+				m.logName, m.logLines = readLog(m.root, r.iid())
 			}
 		}
 		m.frame++
@@ -178,27 +231,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = false
 			m.showLog = false
 			m.expanded = map[string]bool{}
+			m.expandedMR = map[string]bool{}
 		case "up", "k":
 			if m.sel > 0 {
 				m.sel--
 			}
 		case "down", "j":
-			if m.sel < len(m.rows())-1 {
+			if m.sel < len(m.rowRefs())-1 {
 				m.sel++
 			}
 		case "enter", "e":
-			if it, ok := m.selected(); ok {
-				m.expanded[it.key()] = !m.expanded[it.key()]
+			if r, ok := m.selected(); ok {
+				if r.kind == "mr" {
+					m.expandedMR[r.mr.iid] = !m.expandedMR[r.mr.iid]
+				} else {
+					m.expanded[r.it.key()] = !m.expanded[r.it.key()]
+				}
+			}
+		case "o":
+			if r, ok := m.selected(); ok {
+				openInBrowser(webURL(m.root, r.iid()))
 			}
 		case "l":
 			m.showLog = !m.showLog
 			if m.showLog {
-				if it, ok := m.selected(); ok {
-					m.logName, m.logLines = readLog(m.root, it.iid)
+				if r, ok := m.selected(); ok {
+					m.logName, m.logLines = readLog(m.root, r.iid())
 				}
 			}
 		case "a":
-			if it, ok := m.selected(); ok && it.phase == "PLANNED" {
+			if r, ok := m.selected(); ok && r.kind != "mr" && r.it.phase == "PLANNED" {
+				it := r.it
 				_ = os.Remove(filepath.Join(m.root, "state", "tried-"+it.iid))
 				_ = os.Remove(filepath.Join(m.root, "state", "dry-"+it.iid))
 				if f, err := os.Create(filepath.Join(m.root, "state", "approve-"+it.iid)); err == nil {
@@ -395,8 +458,19 @@ func (m model) mrsRadar(aw int) []string {
 }
 
 func (m model) renderBanner() string {
+	// the name types itself in a loop, with a blinking block cursor
+	const name = "merge-medic"
+	cycle := len(name) + 8 // typing + hold with the full name
+	k := m.frame % cycle
+	if k > len(name) {
+		k = len(name)
+	}
+	cur := dim.Render("▌")
+	if m.frame%2 == 1 {
+		cur = " "
+	}
 	return " ▄█▄\n" +
-		" ▀█▀  " + bold.Render("merge-medic") + "\n"
+		" ▀█▀  " + bold.Render(name[:k]) + cur + "\n"
 }
 
 func (m model) View() string {
@@ -461,9 +535,9 @@ func (m model) View() string {
 	}
 
 	var lb strings.Builder
-	if lw >= 100 {
-		w1 := lw / 3
-		w2 := lw / 3
+	if lw >= 72 {
+		w1 := lw * 2 / 5
+		w2 := (lw - w1) / 2
 		w3 := lw - w1 - w2
 		h := max(len(statusLines), max(len(runLines), len(spendLines))) + 1
 		boxH := func(w int, title, body string) string {
@@ -527,10 +601,37 @@ func (m model) View() string {
 					gear = dim.Render("d ")
 				}
 			}
-			act = append(act, fmt.Sprintf(" %s %s %s %s%s %s", ic, ciDot(mr.ci),
+			age := fmtAge(now - mr.updated)
+			if mr.updated == 0 {
+				age = "  "
+			}
+			row := fmt.Sprintf(" %s %s %s %s%s %s %s %s", ic, ciDot(mr.ci),
 				bold.Render(fmt.Sprintf("!%-4s", mr.iid)), gear,
 				dim.Render(fmt.Sprintf("%-*s", bcol, trunc(refs[i], bcol))),
-				tstyle.Render(trunc(title, aw-(15+bcol)))))
+				dim.Render(fmt.Sprintf("%3s", age)),
+				dim.Render(fmt.Sprintf("%-8s", trunc(mr.author, 8))),
+				tstyle.Render(trunc(title, aw-(29+bcol))))
+			if idx == m.sel {
+				row = selRow.Render(row)
+			}
+			if m.expandedMR[mr.iid] {
+				row += "\n" + dim.Render(trunc(fmt.Sprintf("      %s → %s · by %s · updated %s ago · CI %s",
+					mr.src, mr.tgt, mr.author, age, mr.ci), aw))
+				var clashes []string
+				for _, p := range s.radarPairs {
+					if p.a == mr.iid {
+						clashes = append(clashes, "!"+p.b)
+					}
+					if p.b == mr.iid {
+						clashes = append(clashes, "!"+p.a)
+					}
+				}
+				if len(clashes) > 0 {
+					row += "\n      " + yellow.Render(trunc("⚡ clashes with "+strings.Join(clashes, " "), aw-6))
+				}
+			}
+			act = append(act, row)
+			idx++
 		}
 	}
 	act = append(act, m.mrsRadar(aw)...)
@@ -562,14 +663,17 @@ func (m model) View() string {
 		if h := lipgloss.Height(left); h > total {
 			total = h
 		}
-		feedH := total - 2
-		lines := s.feed
-		if len(lines) > feedH {
-			lines = lines[len(lines)-feedH:]
-		}
-		body := strings.Join(lines, "\n")
+		feedH := total - 3
+		body := strings.Join(s.feed, "\n")
 		if body == "" {
 			body = dim.Render(" quiet — waiting for events")
+		} else {
+			// wrap (ANSI-aware), then keep the newest lines that fit
+			wl := strings.Split(lipgloss.NewStyle().Width(liveW-4).Render(body), "\n")
+			if len(wl) > feedH {
+				wl = wl[len(wl)-feedH:]
+			}
+			body = strings.Join(wl, "\n")
 		}
 		liveBox := section.Width(liveW - 2).Height(total - 2).Render(sectionTitle.Render("LIVE") + "\n" + body)
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, liveBox) + "\n")
@@ -578,26 +682,29 @@ func (m model) View() string {
 		used := lipgloss.Height(b.String())
 		feedH := m.height - used - 4
 		if feedH >= 3 {
-			lines := s.feed
-			if len(lines) > feedH {
-				lines = lines[len(lines)-feedH:]
-			}
-			body := strings.Join(lines, "\n")
+			body := strings.Join(s.feed, "\n")
 			if body == "" {
 				body = dim.Render(" quiet — waiting for events")
+			} else {
+				wl := strings.Split(lipgloss.NewStyle().Width(m.width-4).Render(body), "\n")
+				if len(wl) > feedH {
+					wl = wl[len(wl)-feedH:]
+				}
+				body = strings.Join(wl, "\n")
 			}
 			b.WriteString(box(m.width, "LIVE", body) + "\n")
 		}
 	}
 
-	b.WriteString(dim.Render("↑↓ move · enter details · a approve · ? help · q quit"))
+	b.WriteString(dim.Render("↑↓ move · enter details · o open · a approve · ? help · q quit"))
 	return b.String()
 }
 
 func (m model) helpView() string {
 	rows := [][2]string{
 		{"↑↓ / j k", "move selection"},
-		{"enter / e", "expand phase timeline for the selected run"},
+		{"enter / e", "details: phase timeline (runs) / MR info + clashes (MRs)"},
+		{"o", "open the selected MR/PR in the browser"},
 		{"l", "toggle AI/fixer log panel for the selected MR"},
 		{"a", "approve the selected PLANNED plan (semi-auto branches)"},
 		{"r", "force a watcher tick now"},
@@ -706,6 +813,19 @@ func buildFeed(root string, width int) []string {
 		out = out[len(out)-300:]
 	}
 	return out
+}
+
+// fmtAge renders a compact age: 42m, 3h, 2d.
+func fmtAge(sec int64) string {
+	switch {
+	case sec < 0:
+		return "0m"
+	case sec < 3600:
+		return fmt.Sprintf("%dm", sec/60)
+	case sec < 86400:
+		return fmt.Sprintf("%dh", sec/3600)
+	}
+	return fmt.Sprintf("%dd", sec/86400)
 }
 
 func fmtTok(n int64) string {
@@ -843,19 +963,6 @@ func trunc(s string, n int) string {
 	return s
 }
 
-// feedWidth returns the width the LIVE feed lines are truncated for —
-// the right column in the wide layout, the full terminal otherwise.
-func feedWidth(width int) int {
-	if width >= 110 {
-		lw := width * 2 / 5
-		if lw > 100 {
-			lw = 100
-		}
-		return lw - 1
-	}
-	return width
-}
-
 func readSnapshot(root string, width int) snapshot {
 	var s snapshot
 	now := time.Now()
@@ -961,7 +1068,7 @@ func readSnapshot(root string, width int) snapshot {
 		}
 	}
 
-	s.feed = buildFeed(root, feedWidth(width))
+	s.feed = buildFeed(root, 4000)
 	s.spendToday, s.spend, s.modelLine = readTokens(root, day0)
 
 	// DONE per day for the last 14 days (activity sparkline)
@@ -1016,6 +1123,14 @@ func readSnapshot(root string, width int) snapshot {
 			if ciKnown[rest[0]] {
 				mr.ci = rest[0]
 				rest = rest[1:]
+			}
+			// author + RFC3339 updated timestamp (newer state files)
+			if len(rest) >= 2 {
+				if t, err := time.Parse(time.RFC3339, rest[1]); err == nil {
+					mr.author = rest[0]
+					mr.updated = t.Unix()
+					rest = rest[2:]
+				}
 			}
 			mr.title = strings.Join(rest, " ")
 		}
