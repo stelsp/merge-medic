@@ -1,8 +1,9 @@
 // mrtop — the merge-medic live dashboard (bubbletea TUI).
 //
-// Reads the same state/progress-<iid>.log phase events the bash fallback
-// uses, so the two are interchangeable: `mrwatch top` execs this binary when
-// it is built, and falls back to pure bash otherwise.
+// v3: Claude-GUI-style layout — bordered ACTIVE / HISTORY sections, finished
+// runs stay visible as full "done loaders" (backed by the durable
+// state/history.log ledger + per-run phase archives in state/runs/), and
+// every run expands into its phase timeline with enter.
 //
 // Usage: mrtop <merge-medic root dir>
 package main
@@ -23,12 +24,18 @@ import (
 )
 
 var (
-	bold   = lipgloss.NewStyle().Bold(true)
-	dim    = lipgloss.NewStyle().Faint(true)
-	green  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	red    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	yellow = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	selRow = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	bold    = lipgloss.NewStyle().Bold(true)
+	dim     = lipgloss.NewStyle().Faint(true)
+	green   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	red     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	yellow  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	blue    = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
+	selRow  = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	section = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("238")).
+		Padding(0, 1)
+	sectionTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 )
 
 var spinner = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
@@ -53,26 +60,34 @@ var phases = map[string]phaseInfo{
 }
 
 func terminal(phase string) bool {
-	return phase == "DONE" || phase == "FAIL" || phase == "ESCALATED" || phase == "PLANNED"
+	switch phase {
+	case "DONE", "FAIL", "ESCALATED", "PLANNED":
+		return true
+	}
+	return false
 }
 
-type fixer struct {
+// item is one row: a live fixer or a finished run from the ledger.
+type item struct {
 	iid, phase, detail string
 	t0, ts             int64
 	active             bool
+	mode               string // clean | ai | none (history rows)
+	runFile            string // per-run phase archive, "" for live rows
 }
+
+func (it item) key() string { return it.iid + "@" + strconv.FormatInt(it.t0, 10) }
 
 type mrState struct{ iid, status string }
 
 type snapshot struct {
-	fixers                  []fixer
-	mrs                     []mrState
-	budget, budgetMax       string
-	daemon                  bool
-	// today / all-time counters from state/history.log
-	ok, bad, esc    int
-	tok, tbad, tesc int
-	tclean, tai     int
+	activeRows, histRows []item
+	mrs                  []mrState
+	budget, budgetMax    string
+	daemon               bool
+	ok, bad, esc         int
+	tok, tbad, tesc      int
+	tclean, tai          int
 }
 
 type tickMsg time.Time
@@ -81,11 +96,13 @@ type model struct {
 	root     string
 	snap     snapshot
 	sel      int
+	expanded map[string]bool
 	showLog  bool
 	logName  string
 	logLines []string
 	frame    int
 	width    int
+	height   int
 }
 
 func main() {
@@ -93,7 +110,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: mrtop <merge-medic root>")
 		os.Exit(2)
 	}
-	m := model{root: os.Args[1], width: 100}
+	m := model{root: os.Args[1], width: 100, height: 40, expanded: map[string]bool{}}
+	if len(os.Args) > 2 && os.Args[2] == "--once" {
+		m.snap = readSnapshot(m.root)
+		fmt.Println(m.View())
+		return
+	}
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -106,17 +128,31 @@ func tick() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
+func (m model) rows() []item {
+	return append(append([]item{}, m.snap.activeRows...), m.snap.histRows...)
+}
+
+func (m model) selected() (item, bool) {
+	rows := m.rows()
+	if m.sel >= 0 && m.sel < len(rows) {
+		return rows[m.sel], true
+	}
+	return item{}, false
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
+		m.width, m.height = msg.Width, msg.Height
 	case tickMsg:
 		m.snap = readSnapshot(m.root)
-		if m.sel >= len(m.snap.fixers) {
-			m.sel = max(0, len(m.snap.fixers)-1)
+		if n := len(m.rows()); m.sel >= n {
+			m.sel = max(0, n-1)
 		}
 		if m.showLog {
-			m.logName, m.logLines = readLog(m.root, m.selectedIID())
+			if it, ok := m.selected(); ok {
+				m.logName, m.logLines = readLog(m.root, it.iid)
+			}
 		}
 		m.frame++
 		return m, tick()
@@ -130,118 +166,195 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sel--
 			}
 		case "down", "j", "о":
-			if m.sel < len(m.snap.fixers)-1 {
+			if m.sel < len(m.rows())-1 {
 				m.sel++
 			}
-		case "enter", "l", "д":
+		case "enter", "e", "у":
+			if it, ok := m.selected(); ok {
+				m.expanded[it.key()] = !m.expanded[it.key()]
+			}
+		case "l", "д":
 			m.showLog = !m.showLog
 			if m.showLog {
-				m.logName, m.logLines = readLog(m.root, m.selectedIID())
+				if it, ok := m.selected(); ok {
+					m.logName, m.logLines = readLog(m.root, it.iid)
+				}
+			}
+		case "a", "ф":
+			if it, ok := m.selected(); ok && it.phase == "PLANNED" {
+				_ = os.Remove(filepath.Join(m.root, "state", "tried-"+it.iid))
+				_ = os.Remove(filepath.Join(m.root, "state", "dry-"+it.iid))
+				if f, err := os.Create(filepath.Join(m.root, "state", "approve-"+it.iid)); err == nil {
+					_ = f.Close()
+				}
+				c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
+				_ = c.Start()
 			}
 		case "r", "к":
 			c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
 			_ = c.Start()
 		case "p", "з":
 			go togglePause(m.root)
-		case "a", "ф":
-			// approve the selected PLANNED fixer: next tick re-runs it for real
-			if m.sel < len(m.snap.fixers) && m.snap.fixers[m.sel].phase == "PLANNED" {
-				iid := m.snap.fixers[m.sel].iid
-				_ = os.Remove(filepath.Join(m.root, "state", "tried-"+iid))
-				_ = os.Remove(filepath.Join(m.root, "state", "dry-"+iid))
-				if fh, err := os.Create(filepath.Join(m.root, "state", "approve-"+iid)); err == nil {
-					fh.Close()
-				}
-				c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
-				_ = c.Start()
-			}
 		}
 	}
 	return m, nil
 }
 
-func (m model) selectedIID() string {
-	if m.sel < len(m.snap.fixers) {
-		return m.snap.fixers[m.sel].iid
+func outcomeMark(phase string) string {
+	switch phase {
+	case "DONE":
+		return green.Render("✓")
+	case "FAIL":
+		return red.Render("✗")
+	case "ESCALATED":
+		return yellow.Render("⚑")
+	case "PLANNED":
+		return yellow.Render("▣")
 	}
-	return ""
+	return " "
+}
+
+func (m model) renderRow(it item, idx int, now int64) string {
+	mark := outcomeMark(it.phase)
+	if it.active && !terminal(it.phase) {
+		mark = blue.Render(string(spinner[m.frame%len(spinner)]))
+	}
+	inPhase := int(now - it.ts)
+	if terminal(it.phase) {
+		inPhase = 0
+	}
+	pct := phasePct(it.phase, inPhase)
+	el := it.ts - it.t0
+	if it.active && !terminal(it.phase) {
+		el = now - it.t0
+	}
+	if el < 0 {
+		el = 0
+	}
+	style := lipgloss.NewStyle()
+	switch it.phase {
+	case "DONE":
+		style = green
+	case "FAIL":
+		style = red
+	case "AI_RESOLVE", "PLAN", "PLANNED", "ESCALATED":
+		style = yellow
+	}
+	when := time.Unix(it.t0, 0).Format("15:04")
+	tag := it.mode
+	if tag == "" || tag == "none" {
+		tag = "  "
+	}
+	row := fmt.Sprintf(" %s %s %s [%s] %3d%%  %s %3dm%02ds %-5s %s",
+		mark, bold.Render(fmt.Sprintf("!%-4s", it.iid)), dim.Render(when),
+		bar(pct, 20), pct,
+		style.Render(fmt.Sprintf("%-10s", it.phase)), el/60, el%60,
+		dim.Render(tag), dim.Render(trunc(it.detail, m.width-62)))
+	if idx == m.sel {
+		row = selRow.Render(row)
+	}
+	if m.expanded[it.key()] {
+		row += "\n" + m.renderTimeline(it)
+	}
+	return row
+}
+
+// renderTimeline shows the per-phase history of one run.
+func (m model) renderTimeline(it item) string {
+	src := it.runFile
+	if src == "" {
+		src = filepath.Join(m.root, "state", "progress-"+it.iid+".log")
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return dim.Render("      (no phase archive for this run)")
+	}
+	lines := nonEmpty(strings.Split(string(data), "\n"))
+	var b strings.Builder
+	var prev int64
+	for i, ln := range lines {
+		parts := strings.SplitN(ln, "|", 3)
+		if len(parts) < 2 {
+			continue
+		}
+		ts, _ := strconv.ParseInt(parts[0], 10, 64)
+		durStr := ""
+		if i > 0 {
+			durStr = fmt.Sprintf("+%ds", ts-prev)
+		}
+		prev = ts
+		detail := ""
+		if len(parts) > 2 {
+			detail = parts[2]
+		}
+		b.WriteString(fmt.Sprintf("      %s %s %-11s %s\n",
+			dim.Render(time.Unix(ts, 0).Format("15:04:05")),
+			dim.Render(fmt.Sprintf("%6s", durStr)),
+			parts[1], dim.Render(trunc(detail, m.width-40))))
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m model) View() string {
 	var b strings.Builder
 	s := m.snap
-	b.WriteString(bold.Render("merge-medic — live") + "   " + time.Now().Format("15:04:05") + "\n")
+	now := time.Now().Unix()
+
 	d := red.Render("off")
 	if s.daemon {
 		d = green.Render("on")
 	}
-	b.WriteString(fmt.Sprintf("  daemon %s · AI budget %s/%s · today %s %s %s · total %s %s %s (%d clean, %d AI)\n\n",
+	b.WriteString(bold.Render("merge-medic") + dim.Render(" — live  ") + time.Now().Format("15:04:05") + "\n")
+	b.WriteString(fmt.Sprintf("daemon %s · AI budget %s/%s · today %s %s %s · total %s %s %s (%d clean, %d AI)\n",
 		d, s.budget, s.budgetMax,
 		green.Render(fmt.Sprintf("%d✓", s.ok)), red.Render(fmt.Sprintf("%d✗", s.bad)), yellow.Render(fmt.Sprintf("%d⚑", s.esc)),
 		green.Render(fmt.Sprintf("%d✓", s.tok)), red.Render(fmt.Sprintf("%d✗", s.tbad)), yellow.Render(fmt.Sprintf("%d⚑", s.tesc)),
 		s.tclean, s.tai))
 
-	if len(s.fixers) == 0 {
-		b.WriteString(dim.Render("  no active or recent fixers — no conflicts") + "\n")
+	idx := 0
+	var act []string
+	if len(s.activeRows) == 0 {
+		act = append(act, dim.Render(" no active fixers — no new conflicts"))
 	}
-	now := time.Now().Unix()
-	for i, f := range s.fixers {
-		mark := " "
-		if f.active {
-			mark = string(spinner[m.frame%len(spinner)])
-		}
-		inPhase := int(now - f.ts)
-		if !f.active {
-			inPhase = 0
-		}
-		pct := phasePct(f.phase, inPhase)
-		el := f.ts - f.t0
-		if f.active {
-			el = now - f.t0
-		}
-		style := lipgloss.NewStyle()
-		switch f.phase {
-		case "DONE":
-			style = green
-		case "FAIL":
-			style = red
-		case "AI_RESOLVE", "PLAN", "PLANNED", "ESCALATED":
-			style = yellow
-		}
-		row := fmt.Sprintf("  %s %s [%s] %3d%%  %s %3dm%02ds  %s",
-			mark, bold.Render(fmt.Sprintf("!%-4s", f.iid)), bar(pct, 22), pct,
-			style.Render(fmt.Sprintf("%-11s", f.phase)), el/60, el%60,
-			dim.Render(trunc(f.detail, 56)))
-		if i == m.sel {
-			row = selRow.Render(row)
-		}
-		b.WriteString(row + "\n")
+	for _, it := range s.activeRows {
+		act = append(act, m.renderRow(it, idx, now))
+		idx++
 	}
+	b.WriteString(section.Width(m.width - 2).Render(
+		sectionTitle.Render("ACTIVE") + "\n" + strings.Join(act, "\n")) + "\n")
 
-	b.WriteString("\n  " + bold.Render("MRs (last tick):") + " ")
-	if len(s.mrs) == 0 {
-		b.WriteString(dim.Render("none"))
+	var hist []string
+	if len(s.histRows) == 0 {
+		hist = append(hist, dim.Render(" no runs yet"))
 	}
+	for _, it := range s.histRows {
+		hist = append(hist, m.renderRow(it, idx, now))
+		idx++
+	}
+	b.WriteString(section.Width(m.width - 2).Render(
+		sectionTitle.Render("HISTORY") + "\n" + strings.Join(hist, "\n")) + "\n")
+
+	strip := " "
 	for _, mr := range s.mrs {
 		switch mr.status {
 		case "conflict":
-			b.WriteString(red.Render("!"+mr.iid+"✗") + " ")
+			strip += red.Render("!"+mr.iid+"✗") + " "
 		case "mergeable":
-			b.WriteString(green.Render("!"+mr.iid+"✓") + " ")
+			strip += green.Render("!"+mr.iid+"✓") + " "
 		default:
-			b.WriteString(dim.Render("!"+mr.iid+"?") + " ")
+			strip += dim.Render("!"+mr.iid+"?") + " "
 		}
 	}
-	b.WriteString("\n")
+	b.WriteString(bold.Render("MRs") + strip + "\n")
 
 	if m.showLog {
-		b.WriteString("\n  " + bold.Render("log") + " " + dim.Render(m.logName) + "\n")
+		b.WriteString(bold.Render("log ") + dim.Render(m.logName) + "\n")
 		for _, ln := range m.logLines {
-			b.WriteString("  " + dim.Render("│") + " " + trunc(ln, m.width-6) + "\n")
+			b.WriteString(dim.Render("│ ") + trunc(ln, m.width-4) + "\n")
 		}
 	}
 
-	b.WriteString("\n" + dim.Render("  ↑↓ select · enter/l log · a approve PLANNED · r run tick · p pause/resume · q quit"))
+	b.WriteString(dim.Render("↑↓ select · enter timeline · l log · a approve · r tick · p pause · q quit"))
 	return b.String()
 }
 
@@ -285,40 +398,7 @@ func readSnapshot(root string) snapshot {
 	}
 	s.daemon = daemonLoaded()
 
-	// today / all-time counters from the durable ledger
-	if data, err := os.ReadFile(filepath.Join(root, "state", "history.log")); err == nil {
-		for _, ln := range nonEmpty(strings.Split(string(data), "\n")) {
-			parts := strings.SplitN(ln, "|", 4)
-			if len(parts) < 4 {
-				continue
-			}
-			ts, _ := strconv.ParseInt(parts[0], 10, 64)
-			today := ts >= day0
-			switch parts[2] {
-			case "DONE":
-				s.tok++
-				if parts[3] == "clean" {
-					s.tclean++
-				} else if parts[3] == "ai" {
-					s.tai++
-				}
-				if today {
-					s.ok++
-				}
-			case "FAIL":
-				s.tbad++
-				if today {
-					s.bad++
-				}
-			case "ESCALATED":
-				s.tesc++
-				if today {
-					s.esc++
-				}
-			}
-		}
-	}
-
+	// live fixers (non-terminal) and PLANNED waiters from progress files
 	progress, _ := filepath.Glob(filepath.Join(root, "state", "progress-*.log"))
 	sort.Strings(progress)
 	for _, p := range progress {
@@ -331,21 +411,84 @@ func readSnapshot(root string) snapshot {
 			continue
 		}
 		iid := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), "progress-"), ".log")
-		var f fixer
-		f.iid = iid
 		first := strings.SplitN(lines[0], "|", 3)
 		last := strings.SplitN(lines[len(lines)-1], "|", 3)
-		f.t0, _ = strconv.ParseInt(first[0], 10, 64)
-		f.ts, _ = strconv.ParseInt(last[0], 10, 64)
-		f.phase = last[1]
+		var it item
+		it.iid = iid
+		it.t0, _ = strconv.ParseInt(first[0], 10, 64)
+		it.ts, _ = strconv.ParseInt(last[0], 10, 64)
+		it.phase = last[1]
 		if len(last) > 2 {
-			f.detail = last[2]
+			it.detail = last[2]
 		}
-		f.active = !terminal(f.phase)
-		if !f.active && f.phase != "PLANNED" && now.Unix()-f.ts > 7200 {
-			continue // hide finished fixers older than 2h; PLANNED waits for approve
+		it.active = true
+		// terminal runs land in HISTORY via the ledger; PLANNED still needs
+		// action, so it stays in ACTIVE as a waiter
+		if terminal(it.phase) && it.phase != "PLANNED" {
+			continue
 		}
-		s.fixers = append(s.fixers, f)
+		s.activeRows = append(s.activeRows, it)
+	}
+
+	// full run history from the durable ledger, newest first
+	if data, err := os.ReadFile(filepath.Join(root, "state", "history.log")); err == nil {
+		lines := nonEmpty(strings.Split(string(data), "\n"))
+		for i := len(lines) - 1; i >= 0 && len(s.histRows) < 30; i-- {
+			parts := strings.Split(lines[i], "|")
+			if len(parts) < 3 {
+				continue
+			}
+			ts, _ := strconv.ParseInt(parts[0], 10, 64)
+			it := item{iid: parts[1], phase: parts[2], ts: ts, t0: ts}
+			if len(parts) > 3 {
+				it.mode = parts[3]
+			}
+			rf := filepath.Join(root, "state", "runs", it.iid+"-"+parts[0]+".log")
+			if st, err := os.Stat(rf); err == nil && st.Size() > 0 {
+				it.runFile = rf
+				if data, err := os.ReadFile(rf); err == nil {
+					ls := nonEmpty(strings.Split(string(data), "\n"))
+					if len(ls) > 0 {
+						f := strings.SplitN(ls[0], "|", 3)
+						it.t0, _ = strconv.ParseInt(f[0], 10, 64)
+						l := strings.SplitN(ls[len(ls)-1], "|", 3)
+						if len(l) > 2 {
+							it.detail = l[2]
+						}
+					}
+				}
+			}
+			// PLANNED entries whose progress file is still PLANNED are shown
+			// in ACTIVE as waiters — skip the duplicate here
+			if it.phase == "PLANNED" {
+				continue
+			}
+			s.histRows = append(s.histRows, it)
+
+			switch it.phase {
+			case "DONE":
+				s.tok++
+				if it.mode == "clean" {
+					s.tclean++
+				}
+				if it.mode == "ai" {
+					s.tai++
+				}
+				if ts >= day0 {
+					s.ok++
+				}
+			case "FAIL":
+				s.tbad++
+				if ts >= day0 {
+					s.bad++
+				}
+			case "ESCALATED":
+				s.tesc++
+				if ts >= day0 {
+					s.esc++
+				}
+			}
+		}
 	}
 
 	mrFiles, _ := filepath.Glob(filepath.Join(root, "state", "mr-*"))
