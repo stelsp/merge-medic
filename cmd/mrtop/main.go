@@ -133,6 +133,8 @@ type snapshot struct {
 	spendToday, spend    float64  // USD, from the CLI's own accounting
 	modelLine            string   // per-model tokens/cost breakdown
 	pushMode             string   // direct | mr (from config.env)
+	resolver             string   // claude | aider | custom
+	model                string   // active resolver model
 	lastTick             int64    // mtime of watch.log (0 = unknown)
 	lastErr              string   // recent ERROR line from watch.log, "" if none
 	lastErrTs            int64
@@ -427,6 +429,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			setConfigVal(m.root, "DAILY_AGENT_RUNS", strconv.Itoa(cur))
 			m.snap.budgetMax = strconv.Itoa(cur)
+		case "M":
+			if m.focus != 0 || m.snap.resolver != "claude" {
+				break
+			}
+			next := map[string]string{"opus": "sonnet", "sonnet": "haiku", "haiku": "opus"}[m.snap.model]
+			if next == "" {
+				next = "opus"
+			}
+			setConfigVal(m.root, "CLAUDE_MODEL", "\""+next+"\"")
+			m.snap.model = next
 		case "m":
 			if m.focus != 0 {
 				break
@@ -748,6 +760,10 @@ func (m model) View() string {
 	if bmax == 0 {
 		budgetLine = fmt.Sprintf("%s %s today · %s %s", dim.Render("ai-budget"), s.budget, green.Render("∞ unlimited"), dim.Render("+/-"))
 	}
+	modelLine2 := dim.Render("model   ") + amber.Render(s.model) + " " + dim.Render("M")
+	if s.resolver != "claude" {
+		modelLine2 = dim.Render("model   ") + amber.Render(s.model) + dim.Render(" ("+s.resolver+", config.env)")
+	}
 	pm := green.Render("direct push")
 	if s.pushMode == "mr" {
 		pm = yellow.Render("via resolution MR")
@@ -757,6 +773,7 @@ func (m model) View() string {
 			time.Now().Format("15:04:05"), d),
 		budgetLine,
 		dim.Render("deliver ") + pm + " " + dim.Render("m"),
+		modelLine2,
 	}
 	if s.lastErr != "" {
 		statusLines = append(statusLines, red.Render("⚠ "+s.lastErr))
@@ -1187,6 +1204,7 @@ func (m model) helpView() string {
 		{"tab", "cycle focus: ACTIVE → HISTORY → LIVE (j/k scrolls the log)"},
 		{"+ / -", "raise / lower the daily AI budget when STATUS is focused (0 = unlimited)"},
 		{"m", "toggle delivery when STATUS is focused: direct push ↔ resolution MR"},
+		{"M", "cycle the Claude model when STATUS is focused: opus → sonnet → haiku"},
 		{"1 / 2 / 3", "screens: main dashboard / insights (hotspots, spend) / fleet (instances)"},
 		{"l", "toggle AI/fixer log panel for the selected MR"},
 		{"a", "approve the selected PLANNED plan (semi-auto branches)"},
@@ -1504,6 +1522,12 @@ func readSnapshot(root string, width int) snapshot {
 	}
 	s.daemon = daemonLoaded(root)
 	s.pushMode = readConfigVal(root, "PUSH_MODE", "direct")
+	s.resolver = readConfigVal(root, "RESOLVER", "claude")
+	if s.resolver == "claude" {
+		s.model = readConfigVal(root, "CLAUDE_MODEL", "opus")
+	} else {
+		s.model = readConfigVal(root, "RESOLVER_MODEL", "?")
+	}
 
 	// live fixers (non-terminal) and PLANNED waiters from progress files
 	progress, _ := filepath.Glob(filepath.Join(root, "state", "progress-*.log"))
