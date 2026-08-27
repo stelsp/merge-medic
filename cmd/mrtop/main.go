@@ -359,8 +359,8 @@ func (m model) renderTimeline(it item) string {
 var orbit = []rune("◐◓◑◒")
 
 func (m model) renderBanner() string {
-	return " ▄█▄\n" +
-		" ▀█▀  " + bold.Render("merge-medic") + "\n"
+	return " █▀█\n" +
+		" ▀▀▀  " + bold.Render("merge-medic") + "\n"
 }
 
 func (m model) View() string {
@@ -963,6 +963,10 @@ func readConfigVal(root, key, def string) string {
 // daemonLoaded checks this instance's scheduler job — the job name is derived
 // from the install dir basename (multi-instance: one clone per watched repo).
 func daemonLoaded(root string) bool {
+	// test/demo hook: synthetic state dirs have no real scheduler job
+	if os.Getenv("MRTOP_FAKE_DAEMON") == "1" {
+		return true
+	}
 	inst := strings.TrimPrefix(filepath.Base(root), ".")
 	if runtime.GOOS == "darwin" {
 		out, err := exec.Command("launchctl", "list").Output()
