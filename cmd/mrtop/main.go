@@ -145,6 +145,8 @@ type snapshot struct {
 type hotspot struct {
 	file  string
 	count int
+	mrs   []string // which MRs it conflicted in
+	last  int64    // most recent conflict involving this file
 }
 
 type costRun struct {
@@ -159,7 +161,7 @@ type model struct {
 	root       string
 	snap       snapshot
 	sel        int // cursor within the focused panel
-	focus      int // 0 STATUS · 1 RUNS · 2 SPEND · 3 ACTIVE · 4 HISTORY · 5 LIVE
+	focus      int // 0 STATUS · 1 RUNS · 2 SPEND · 3 ACTIVE · 4 HISTORY · 5 HOTSPOTS · 6 LIVE
 	selH       int // HISTORY cursor (kept when switching focus)
 	liveOff    int // lines scrolled up from the tail of LIVE (0 = follow)
 	expanded   map[string]bool
@@ -359,7 +361,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "2":
 			m.screen = 2
 		case "esc":
-			if m.screen == 3 || m.screen == 4 {
+			if m.screen >= 3 && m.screen <= 5 {
 				m.screen = 0
 				break
 			}
@@ -369,7 +371,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.expanded = map[string]bool{}
 			m.expandedMR = map[string]bool{}
 		case "tab":
-			m.focus = (m.focus + 1) % 6
+			m.focus = (m.focus + 1) % 7
 		case "up", "k":
 			if m.screen == 2 {
 				if m.selF > 0 {
@@ -390,7 +392,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.selH > 0 {
 					m.selH--
 				}
-			case 5:
+			case 6:
 				m.liveOff++
 			}
 		case "down", "j":
@@ -413,7 +415,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.selH < len(m.histRefs())-1 {
 					m.selH++
 				}
-			case 5:
+			case 6:
 				m.liveOff = max(0, m.liveOff-1)
 			}
 		case "enter", "e":
@@ -423,6 +425,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.screen == 0 && m.focus == 2 {
 				m.screen = 4
+				break
+			}
+			if m.screen == 0 && m.focus == 5 {
+				m.screen = 5
 				break
 			}
 			if m.screen == 2 {
@@ -781,6 +787,9 @@ func (m model) View() string {
 	if m.screen == 4 {
 		return m.spendDetailView()
 	}
+	if m.screen == 5 {
+		return m.hotspotsDetailView()
+	}
 	s := m.snap
 	now := time.Now().Unix()
 	wide := m.width >= 110
@@ -1047,7 +1056,7 @@ func (m model) View() string {
 				yellow.Render(strings.Repeat("▪", max(1, h.count*10/maxC))),
 				dim.Render(trunc(h.file, lw-24))))
 		}
-		lb.WriteString(titledBox(lw, "HOTSPOTS", "most-conflicted files", strings.Join(hs, "\n"), 0, false) + "\n")
+		lb.WriteString(titledBox(lw, "HOTSPOTS", "most-conflicted files", strings.Join(hs, "\n"), 0, m.focus == 5) + "\n")
 	}
 
 	if m.showLog {
@@ -1107,12 +1116,12 @@ func (m model) View() string {
 			wl = wl[start:end]
 			// with LIVE focused, the cursor line sits at the bottom of the
 			// window and j/k walk it line by line
-			if m.focus == 5 && len(wl) > 0 {
+			if m.focus == 6 && len(wl) > 0 {
 				wl[len(wl)-1] = selMark(wl[len(wl)-1], liveW-4)
 			}
 			body = strings.Join(wl, "\n")
 		}
-		liveBox := titledBox(liveW, "LIVE", badge, body, total-2, m.focus == 5)
+		liveBox := titledBox(liveW, "LIVE", badge, body, total-2, m.focus == 6)
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, liveBox) + "\n")
 	} else {
 		b.WriteString(lb.String())
@@ -1345,6 +1354,41 @@ func (m model) spendDetailView() string {
 	return b.String()
 }
 
+// hotspotsDetailView — enter on HOTSPOTS: which files keep conflicting,
+// in which MRs, and how recently. Repeated names = architectural pressure:
+// split the file, or serialize the work that keeps colliding in it.
+func (m model) hotspotsDetailView() string {
+	s := m.snap
+	var b strings.Builder
+	b.WriteString(m.renderBanner())
+	var rows []string
+	if len(s.hotspots) == 0 {
+		rows = append(rows, dim.Render(" no archived AI runs yet"))
+	}
+	maxC := 1
+	if len(s.hotspots) > 0 {
+		maxC = s.hotspots[0].count
+	}
+	for _, h := range s.hotspots {
+		mrList := "!" + strings.Join(h.mrs, " !")
+		rows = append(rows, fmt.Sprintf(" %s %s %s",
+			amber.Render(fmt.Sprintf("%3d×", h.count)),
+			yellow.Render(strings.Repeat("▪", max(1, h.count*14/maxC))),
+			dim.Render(trunc(h.file, 60))))
+		rows = append(rows, dim.Render(fmt.Sprintf("       in %s · last %s",
+			trunc(mrList, 44), time.Unix(h.last, 0).Format("02.01 15:04"))))
+	}
+	rows = append(rows, "", dim.Render(" a file that keeps showing up here is a merge magnet —"),
+		dim.Render(" consider splitting it, or serializing the MRs that fight over it"))
+	bw := m.width
+	if bw > 78 {
+		bw = 78
+	}
+	b.WriteString(titledBox(bw, "HOTSPOTS", "conflict magnets, all runs", strings.Join(rows, "\n"), 0, true) + "\n")
+	b.WriteString(" " + amber.Render("esc") + dim.Render(" back · ") + amber.Render("q") + dim.Render(" quit"))
+	return b.String()
+}
+
 // readInstances lists installed merge-medic roots from the registry.
 func readInstances() []string {
 	home, _ := os.UserHomeDir()
@@ -1416,8 +1460,8 @@ func (m model) helpView() string {
 		{"↑↓ / j k", "move selection"},
 		{"enter / e", "details: phase timeline (runs) / MR info + clashes (MRs)"},
 		{"o", "open the selected MR/PR in the browser"},
-		{"tab", "cycle focus: STATUS → RUNS → SPEND → ACTIVE → HISTORY → LIVE"},
-		{"enter", "on focused RUNS / SPEND: full-screen breakdown with charts"},
+		{"tab", "cycle focus: STATUS → RUNS → SPEND → ACTIVE → HISTORY → HOTSPOTS → LIVE"},
+		{"enter", "on focused RUNS / SPEND / HOTSPOTS: full-screen breakdown"},
 		{"+ / -", "budget shortcut while STATUS is focused (0 = unlimited)"},
 		{"← →", "change the selected STATUS setting (budget / delivery / model)"},
 		{"1 / 2", "screens: main dashboard / fleet (instances)"},
@@ -1895,10 +1939,14 @@ func readSnapshot(root string, width int) snapshot {
 		s.lastErr = "" // old news
 	}
 
-	// hotspots: conflicted files across all archived runs
+	// hotspots: conflicted files across all archived runs, with the MRs
+	// they conflicted in and the most recent occurrence
 	fileCount := map[string]int{}
+	fileMRs := map[string]map[string]bool{}
+	fileLast := map[string]int64{}
 	if runFiles, err := filepath.Glob(filepath.Join(root, "state", "runs", "*.log")); err == nil {
 		for _, rf := range runFiles {
+			iid := strings.SplitN(filepath.Base(rf), "-", 2)[0]
 			data, err := os.ReadFile(rf)
 			if err != nil {
 				continue
@@ -1908,17 +1956,30 @@ func readSnapshot(root string, width int) snapshot {
 				if len(parts) < 3 || (parts[1] != "AI_RESOLVE" && parts[1] != "PLAN") {
 					continue
 				}
+				ts, _ := strconv.ParseInt(parts[0], 10, 64)
 				d := parts[2]
 				if i := strings.Index(d, "file(s): "); i >= 0 {
 					for _, f := range strings.Fields(d[i+9:]) {
 						fileCount[f]++
+						if fileMRs[f] == nil {
+							fileMRs[f] = map[string]bool{}
+						}
+						fileMRs[f][iid] = true
+						if ts > fileLast[f] {
+							fileLast[f] = ts
+						}
 					}
 				}
 			}
 		}
 	}
 	for f, c := range fileCount {
-		s.hotspots = append(s.hotspots, hotspot{f, c})
+		var mrs []string
+		for iid := range fileMRs[f] {
+			mrs = append(mrs, iid)
+		}
+		sort.Strings(mrs)
+		s.hotspots = append(s.hotspots, hotspot{f, c, mrs, fileLast[f]})
 	}
 	sort.Slice(s.hotspots, func(i, j int) bool {
 		if s.hotspots[i].count != s.hotspots[j].count {
