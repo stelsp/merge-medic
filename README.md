@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/stelsp/merge-medic/actions/workflows/ci.yml/badge.svg)](https://github.com/stelsp/merge-medic/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-![Platforms](https://img.shields.io/badge/macOS%20%7C%20Linux-launchd%20%2F%20systemd-lightgrey)
+![Platforms](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows%20(WSL2)-launchd%20%2F%20systemd-lightgrey)
 ![Forges](https://img.shields.io/badge/GitLab%20%7C%20GitHub-glab%20%2F%20gh-orange)
 
 **Self-hosted MR/PR conflict watcher that resolves merge conflicts with AI —
@@ -87,15 +87,16 @@ never pushes to a non-auto branch without that approve.
 | Scoped AI | resolver runs headless with a minimal tool allowlist; it cannot commit or push |
 | DRY_RUN | default mode: detect and log only |
 
-Desktop notifications (macOS `osascript` / Linux `notify-send`) fire on:
-new conflict, fixer started, fixed ✓ / failed / escalated.
+Desktop notifications (macOS `osascript` / Linux `notify-send` / Windows
+toast from WSL) fire on: new conflict, fixer started, fixed ✓ / failed /
+escalated.
 
 ## Install
 
-Requirements: macOS (launchd) or Linux (systemd user timer), `jq`, `git`,
-[Claude Code CLI](https://code.claude.com), and your forge CLI —
-[`glab`](https://gitlab.com/gitlab-org/cli) for GitLab (default) or
-[`gh`](https://cli.github.com) for GitHub.
+Requirements: macOS (launchd), Linux (systemd user timer) or Windows via
+WSL2 (see below), `jq`, `git`, [Claude Code CLI](https://code.claude.com),
+and your forge CLI — [`glab`](https://gitlab.com/gitlab-org/cli) for GitLab
+(default) or [`gh`](https://cli.github.com) for GitHub.
 
 ```bash
 git clone https://github.com/stelsp/merge-medic && cd merge-medic
@@ -104,6 +105,24 @@ vim config.env        # project, host, verify command
 mrwatch log -f        # watch a few dry ticks
 # happy? set DRY_RUN=0 in config.env — that's it
 ```
+
+### Windows (WSL2)
+
+merge-medic runs on Windows inside [WSL2](https://learn.microsoft.com/windows/wsl/)
+exactly as on Linux — same installer, same systemd timer. Two extras:
+
+1. **Enable systemd** in your distro (once):
+   ```bash
+   printf '[boot]\nsystemd=true\n' | sudo tee -a /etc/wsl.conf
+   ```
+   then `wsl --shutdown` from Windows and reopen the distro. `install.sh`
+   detects the missing systemd and prints these exact steps.
+2. **Notifications** need nothing: inside WSL, `mm_notify` bridges to native
+   Windows toast notifications via `powershell.exe` automatically.
+
+Caveat: WSL pauses when no WSL process is running, so keep a distro terminal
+open (or set a Windows Task Scheduler job running `wsl -e true` periodically)
+if you want ticks while you're not working inside WSL.
 
 Updating later: `git pull && make build` (mrtop) — config/state are local and
 gitignored.
