@@ -26,6 +26,12 @@ test gates; and anything the bot shouldn't decide is **escalated to a human**
 instead of guessed. Your branch is never rebased or force-pushed — the fix is
 always a `chore: merge origin/<target> into <branch>` commit.
 
+Not a Claude shop? The resolver is pluggable — **any model** via
+[aider](https://aider.chat) (`RESOLVER=aider`) or your own command. Don't
+want a bot pushing into your branch at all? `PUSH_MODE=mr` delivers every
+fix as **its own MR into your branch** — you review the diff and press
+merge; your branch is never touched.
+
 ## Why this exists
 
 There was no off-the-shelf tool in this niche (checked Aug 2026):
@@ -34,7 +40,8 @@ There was no off-the-shelf tool in this niche (checked Aug 2026):
   button press, and needs Premium/Ultimate.
 - **marge-bot / Renovate** keep branches fresh — by rebasing, which rewrites
   published history.
-- **Mergify** has no GitLab support.
+- **Mergify** has no GitLab support — and doesn't resolve conflicts anyway:
+  a conflicted PR just drops out of its merge queue for a human to fix.
 - GitLab has **no webhook** for "MR became conflicted"
   ([work item 592455](https://gitlab.com/gitlab-org/gitlab/-/work_items/592455)),
   so polling is the only reliable edge detector — it just has to be free.
@@ -96,7 +103,7 @@ tool does this; here it costs zero tokens and zero API calls.
 
 Desktop notifications (macOS `osascript` / Linux `notify-send` / Windows
 toast from WSL) fire on: new conflict, fixer started, fixed ✓ / failed /
-escalated.
+escalated, and newly-detected radar pairs.
 
 ## Install
 
@@ -171,16 +178,18 @@ dashboard — one window. With several instances installed, plain `mrwatch`
 asks which project to open first; suffixed commands (`mrwatch-gh …`) go
 straight to theirs.
 
-`mrwatch top` is **`mrtop`** — a Go /
-[bubbletea](https://github.com/charmbracelet/bubbletea) dashboard built by
+The dashboard is **`mrtop`** — a Go /
+[bubbletea](https://github.com/charmbracelet/bubbletea) ops console built by
 `install.sh` when Go is present (a pure-bash fallback reads the same phase
-logs; `MRWATCH_PLAIN=1` forces it). The grid: **STATUS / RUNS / SPEND**
-(budget gauge, day counters, 14-day activity sparkline, per-model token
-spend in $), **ACTIVE** (live fixers with interpolated progress bars, plus
-every open MR with its state), **HISTORY** (all-time ledger) and a full-width
-**LIVE** event feed. Keys: `↑↓/jk` move, `enter` per-phase timeline of any
-run, `a` approve a plan, `l` AI/fixer log panel, `r` force tick, `p`
-pause/resume, `?` help, `esc` close, `q` quit.
+logs; `MRWATCH_PLAIN=1` forces it). Left side: **STATUS / RUNS / SPEND**
+(budget, day counters, 14-day sparkline, per-model $ spend), **ACTIVE** —
+live fixers on a segmented 8-phase path bar plus every open MR with
+mergeability, CI dot, author, age and ⚡ radar warnings — and the
+**HISTORY** ledger. The right side is a full-height **LIVE** event rail
+with wrap and scrollback. `tab` moves focus (amber border); `enter` expands
+a run's phase timeline or an MR's details, `o` opens the MR in the browser,
+`a` approves a plan, `l` shows the fixer/AI log, `r` forces a tick, `p`
+pauses, `?` help, `q` quit.
 
 ## Configuration
 
@@ -207,7 +216,7 @@ Everything lives in `config.env` (gitignored; seeded from
 | `INCLUDE_BRANCHES` | allowlist of source-branch globs — when set, everything else is ignored entirely |
 | `RADAR` | `1` (default) — warn when two open MRs conflict with each other (free merge-tree checks) |
 | `EXCLUDE_BRANCHES` | branches to ignore (your active work) |
-| `DAILY_AGENT_RUNS` | daily cap on AI invocations |
+| `DAILY_AGENT_RUNS` | daily cap on AI invocations; `0` = unlimited (runs still counted) |
 | `PARALLEL_FIXERS` | concurrent fixers (`1` = sequential) |
 | `NOTIFY` / `NOTIFY_SOUND` | desktop notifications |
 
@@ -216,15 +225,17 @@ Everything lives in `config.env` (gitignored; seeded from
 ```
 launchd / systemd user timer (every N s)
   └─ watch.sh            bash + glab/gh — free polling, edge detection,
-     │                   SHA dedup, budget guard, notifications
+     │                   SHA dedup, budget guard, conflict radar, notifications
      └─ fix-mr.sh ×N     one per conflicted MR (PARALLEL_FIXERS cap)
         ├─ defer         branch pushed < QUIET_MINUTES ago? → retry when quiet
         ├─ git worktree  isolated per MR
         ├─ git merge     zdiff3 markers; clean? → done, 0 tokens
         ├─ escalation    protected paths / incompatible changes → human
-        ├─ claude -p     resolve-only prompt + intent context + policy file
+        ├─ resolver      claude / aider (any model) / custom — resolve-only
+        │                prompt + intent context + policy file
         ├─ gates         VERIFY_CMD → TEST_CMD_TEMPLATE → REGRESSION_CMD
-        ├─ git push      merge commit, never rebase
+        ├─ deliver       push the merge commit (PUSH_MODE=direct) or open a
+        │                resolution MR into the branch (PUSH_MODE=mr)
         └─ MR comment    per-file reasoning (POST_RESOLUTION_NOTE)
 
 state/progress-<iid>.log  ←  phase events  ←  mrtop / mrwatch top
@@ -234,8 +245,8 @@ state/progress-<iid>.log  ←  phase events  ←  mrtop / mrwatch top
 
 - Baseline "no new failures" diffing (run the suite on the branch tip, compare
   failure sets) — deferred until chronically red branches make it worth it
-- Server-side mode: same loop as a GitLab scheduled pipeline (survives laptop
-  sleep)
+- Server-side mode: the same loop as a GitLab scheduled pipeline / GitHub
+  Action on a cron — no daemon, survives laptop sleep
 - Auto-retire polling if GitLab ever ships the `merge_request_conflict` webhook
 
 ## License
