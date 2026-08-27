@@ -772,7 +772,7 @@ func readSnapshot(root string, width int) snapshot {
 	if b, err := os.ReadFile(filepath.Join(root, "state", "budget-"+now.Format("2006-01-02"))); err == nil {
 		s.budget = strings.TrimSpace(string(b))
 	}
-	s.daemon = daemonLoaded()
+	s.daemon = daemonLoaded(root)
 
 	// live fixers (non-terminal) and PLANNED waiters from progress files
 	progress, _ := filepath.Glob(filepath.Join(root, "state", "progress-*.log"))
@@ -960,17 +960,20 @@ func readConfigVal(root, key, def string) string {
 	return def
 }
 
-func daemonLoaded() bool {
+// daemonLoaded checks this instance's scheduler job — the job name is derived
+// from the install dir basename (multi-instance: one clone per watched repo).
+func daemonLoaded(root string) bool {
+	inst := strings.TrimPrefix(filepath.Base(root), ".")
 	if runtime.GOOS == "darwin" {
 		out, err := exec.Command("launchctl", "list").Output()
-		return err == nil && strings.Contains(string(out), "com.merge-medic.watch")
+		return err == nil && strings.Contains(string(out), "com."+inst+".watch")
 	}
-	return exec.Command("systemctl", "--user", "is-active", "--quiet", "merge-medic.timer").Run() == nil
+	return exec.Command("systemctl", "--user", "is-active", "--quiet", inst+".timer").Run() == nil
 }
 
 func togglePause(root string) {
 	mrwatch := filepath.Join(root, "bin", "mrwatch")
-	if daemonLoaded() {
+	if daemonLoaded(root) {
 		_ = exec.Command("bash", mrwatch, "pause").Run()
 	} else {
 		_ = exec.Command("bash", mrwatch, "resume").Run()

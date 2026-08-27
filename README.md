@@ -143,6 +143,12 @@ if you want ticks while you're not working inside WSL.
 Updating later: `git pull && make build` (mrtop) — config/state are local and
 gitignored.
 
+**Multiple repos:** one clone = one instance. Clone again under a different
+name (`~/.merge-medic-gh`, `~/.merge-medic-work`, …), give each its own
+`config.env` and run its `install.sh` — every instance gets its own scheduler
+job and its own suffixed CLI (`mrwatch-gh top`), fully independent state and
+dashboards.
+
 ## CLI
 
 ```

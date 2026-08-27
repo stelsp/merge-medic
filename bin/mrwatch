@@ -15,7 +15,8 @@ set -euo pipefail
 SELF="${BASH_SOURCE[0]}"
 while [ -L "$SELF" ]; do SELF="$(readlink "$SELF")"; done
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
-LABEL="com.merge-medic.watch"
+INST="$(basename "$ROOT")"; INST="${INST#.}"
+LABEL="com.$INST.watch"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 OS="$(uname -s)"
 # shellcheck source=/dev/null
@@ -25,7 +26,7 @@ daemon_loaded() {
   if [ "$OS" = "Darwin" ]; then
     launchctl list 2>/dev/null | grep -q "$LABEL"
   else
-    systemctl --user is-active --quiet merge-medic.timer 2>/dev/null
+    systemctl --user is-active --quiet "$INST.timer" 2>/dev/null
   fi
 }
 
@@ -434,7 +435,7 @@ case "$cmd" in
     if [ "$OS" = "Darwin" ]; then
       launchctl unload "$PLIST"
     else
-      systemctl --user stop merge-medic.timer
+      systemctl --user stop "$INST.timer"
     fi
     echo "watcher paused (mrwatch resume to bring back)"
     ;;
@@ -443,7 +444,7 @@ case "$cmd" in
     if [ "$OS" = "Darwin" ]; then
       launchctl load "$PLIST"
     else
-      systemctl --user start merge-medic.timer
+      systemctl --user start "$INST.timer"
     fi
     echo "watcher running"
     ;;
