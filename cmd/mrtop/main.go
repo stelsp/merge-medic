@@ -132,6 +132,7 @@ type snapshot struct {
 	daily                []int    // DONE per day, last 14 days, oldest first
 	spendToday, spend    float64  // USD, from the CLI's own accounting
 	modelLine            string   // per-model tokens/cost breakdown
+	pushMode             string   // direct | mr (from config.env)
 	lastTick             int64    // mtime of watch.log (0 = unknown)
 	lastErr              string   // recent ERROR line from watch.log, "" if none
 	lastErrTs            int64
@@ -415,6 +416,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			setConfigVal(m.root, "DAILY_AGENT_RUNS", strconv.Itoa(cur))
 			m.snap.budgetMax = strconv.Itoa(cur)
+		case "m":
+			if m.focus != 0 {
+				break
+			}
+			mode := "mr"
+			if m.snap.pushMode == "mr" {
+				mode = "direct"
+			}
+			setConfigVal(m.root, "PUSH_MODE", "\""+mode+"\"")
+			m.snap.pushMode = mode
 		case "r":
 			c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
 			_ = c.Start()
@@ -735,10 +746,15 @@ func (m model) View() string {
 		}
 		tickLine = dim.Render("tick   ") + st.Render(fmtAge(agoS)+" ago")
 	}
+	pm := green.Render("direct push")
+	if s.pushMode == "mr" {
+		pm = yellow.Render("via resolution MR")
+	}
 	statusLines := []string{
 		fmt.Sprintf("%s %s · daemon %s", amber.Render(string(orbit[m.frame%len(orbit)])),
 			time.Now().Format("15:04:05"), d),
 		budgetLine,
+		dim.Render("deliver ") + pm + " " + dim.Render("m"),
 		tickLine,
 	}
 	if s.lastErr != "" {
@@ -1138,6 +1154,7 @@ func (m model) helpView() string {
 		{"o", "open the selected MR/PR in the browser"},
 		{"tab", "cycle focus: ACTIVE → HISTORY → LIVE (j/k scrolls the log)"},
 		{"+ / -", "raise / lower the daily AI budget when STATUS is focused (0 = unlimited)"},
+		{"m", "toggle delivery when STATUS is focused: direct push ↔ resolution MR"},
 		{"1 / 2 / 3", "screens: main dashboard / insights (hotspots, spend) / fleet (instances)"},
 		{"l", "toggle AI/fixer log panel for the selected MR"},
 		{"a", "approve the selected PLANNED plan (semi-auto branches)"},
@@ -1454,6 +1471,7 @@ func readSnapshot(root string, width int) snapshot {
 		s.budget = strings.TrimSpace(string(b))
 	}
 	s.daemon = daemonLoaded(root)
+	s.pushMode = readConfigVal(root, "PUSH_MODE", "direct")
 
 	// live fixers (non-terminal) and PLANNED waiters from progress files
 	progress, _ := filepath.Glob(filepath.Join(root, "state", "progress-*.log"))
