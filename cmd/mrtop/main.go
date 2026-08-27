@@ -360,7 +360,8 @@ var orbit = []rune("◐◓◑◒")
 
 func (m model) renderBanner() string {
 	return " █▀█\n" +
-		" ▀▀▀  " + bold.Render("merge-medic") + "\n"
+		" ▀▀▀\n" +
+		" ▄▄▄  " + bold.Render("merge-medic") + "\n"
 }
 
 func (m model) View() string {
