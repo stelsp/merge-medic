@@ -448,28 +448,44 @@ func (m model) View() string {
 		if len(act) > 0 {
 			act = append(act, dim.Render(strings.Repeat("─", max(1, aw-1))))
 		}
-		for _, mr := range s.mrs {
-			ic, st := dim.Render("?"), dim
+		// branch column: as wide as the widest ref actually present (capped) —
+		// a single long branch name must not push every title away
+		bcol := 0
+		refs := make([]string, len(s.mrs))
+		for i, mr := range s.mrs {
+			if mr.src != "" {
+				refs[i] = mr.src + "→" + mr.tgt
+			}
+			if n := len([]rune(refs[i])); n > bcol {
+				bcol = n
+			}
+		}
+		bcol = min(bcol, min(18, aw/3))
+		for i, mr := range s.mrs {
+			ic := dim.Render("?")
 			switch mr.status {
 			case "conflict":
-				ic, st = red.Render("✗"), red
+				ic = red.Render("✗")
 			case "mergeable":
-				ic, st = green.Render("✓"), green
-			}
-			ref := ""
-			if mr.src != "" {
-				ref = mr.src + "→" + mr.tgt
+				ic = green.Render("✓")
 			}
 			gear := "  "
 			if fixing[mr.iid] {
 				gear = blue.Render("⚙ ")
 			}
-			// fixed-width branch column so titles line up
-			bcol := min(26, aw/3)
+			title := mr.title
+			tstyle := lipgloss.NewStyle()
+			if d, ok := strings.CutPrefix(title, "Draft: "); ok {
+				title = d
+				tstyle = dim
+				if gear == "  " {
+					gear = dim.Render("d ")
+				}
+			}
 			act = append(act, fmt.Sprintf(" %s %s %s%s %s", ic,
 				bold.Render(fmt.Sprintf("!%-4s", mr.iid)), gear,
-				st.Render(fmt.Sprintf("%-*s", bcol, trunc(ref, bcol))),
-				dim.Render(trunc(mr.title, aw-(13+bcol)))))
+				dim.Render(fmt.Sprintf("%-*s", bcol, trunc(refs[i], bcol))),
+				tstyle.Render(trunc(title, aw-(13+bcol)))))
 		}
 	}
 	if len(act) == 0 {
@@ -738,6 +754,9 @@ func bar(pct, width int) string {
 func trunc(s string, n int) string {
 	r := []rune(s)
 	if n > 0 && len(r) > n {
+		if n > 1 {
+			return string(r[:n-1]) + "…"
+		}
 		return string(r[:n])
 	}
 	return s
@@ -867,11 +886,11 @@ func readSnapshot(root string, width int) snapshot {
 		}
 	}
 
-	// open MRs — mr-* files fresher than an hour (stale ones are closed MRs
+	// open MRs — mr-* files fresher than 15 min (stale ones are closed MRs
 	// or a stopped daemon; either way not "current")
 	mrFiles, _ := filepath.Glob(filepath.Join(root, "state", "mr-*"))
 	for _, f := range mrFiles {
-		if st, err := os.Stat(f); err != nil || now.Sub(st.ModTime()) > time.Hour {
+		if st, err := os.Stat(f); err != nil || now.Sub(st.ModTime()) > 15*time.Minute {
 			continue
 		}
 		data, err := os.ReadFile(f)
