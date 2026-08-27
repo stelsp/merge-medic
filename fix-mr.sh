@@ -280,7 +280,8 @@ else
   BLOCK="$ROOT/state/.budget.lock"
   until mkdir "$BLOCK" 2>/dev/null; do sleep 0.2; done
   spent="$(cat "$BUDGET_FILE" 2>/dev/null || echo 0)"
-  if [ "$spent" -ge "${DAILY_AGENT_RUNS:-6}" ]; then
+  # DAILY_AGENT_RUNS=0 means unlimited — count runs, never refuse
+  if [ "${DAILY_AGENT_RUNS:-6}" -gt 0 ] && [ "$spent" -ge "${DAILY_AGENT_RUNS:-6}" ]; then
     rmdir "$BLOCK"; git merge --abort 2>/dev/null || true
     fail "daily AI budget exhausted ($spent/${DAILY_AGENT_RUNS:-6})"
   fi

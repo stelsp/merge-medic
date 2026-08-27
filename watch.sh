@@ -195,9 +195,11 @@ if [ -z "$targets" ]; then
 fi
 
 count="$(printf '%s' "$targets" | grep -c . || true)"
-log "to fix: $count MR(s); AI budget spent today: $spent/${DAILY_AGENT_RUNS:-6}"
+lim="${DAILY_AGENT_RUNS:-6}"
+lim_label="$lim"; [ "$lim" = "0" ] && lim_label="∞"
+log "to fix: $count MR(s); AI budget spent today: $spent/$lim_label"
 
-if [ "$spent" -ge "${DAILY_AGENT_RUNS:-6}" ]; then
+if [ "$lim" -gt 0 ] && [ "$spent" -ge "$lim" ]; then
   log "daily AI budget exhausted — skipping"; exit 0
 fi
 
