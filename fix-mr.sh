@@ -30,7 +30,14 @@ cleanup_wt() { git -C "$WATCH_REPO" worktree remove --force "$WT" 2>/dev/null ||
 # Durable all-time ledger (progress files get overwritten per run):
 # ts|iid|OUTCOME|mode  where mode = none|clean|ai
 resolve_mode="none"
-ledger() { printf '%s|%s|%s|%s\n' "$(date +%s)" "$IID" "$1" "$resolve_mode" >> "$ROOT/state/history.log"; }
+# Durable outcome ledger + per-run phase archive (state/runs/<iid>-<ts>.log)
+# so dashboards can show full history for every MR.
+ledger() {
+  local lts; lts="$(date +%s)"
+  printf '%s|%s|%s|%s\n' "$lts" "$IID" "$1" "$resolve_mode" >> "$ROOT/state/history.log"
+  mkdir -p "$ROOT/state/runs"
+  cp "$PROG" "$ROOT/state/runs/$IID-$lts.log" 2>/dev/null || true
+}
 fail() {
   ev FAIL "$1"; ledger FAIL
   notify "${SIGIL}$IID: fix failed" "$1"
