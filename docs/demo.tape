@@ -15,7 +15,7 @@ Set Framerate 12
 Set TypingSpeed 40ms
 
 Hide
-Type `alias mrwatch='./bin/mrtop /tmp/mm-demo #'`
+Type `alias mrwatch='MRTOP_FAKE_DAEMON=1 ./bin/mrtop /tmp/mm-demo #'`
 Enter
 Type "clear"
 Enter
