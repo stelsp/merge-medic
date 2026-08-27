@@ -263,7 +263,8 @@ else
   n="$(printf '%s\n' "$conflicts" | grep -c .)"
 
   # ── hard escalation zones: the bot never decides here ───────────────────────
-  for f in $conflicts; do
+  # (an approved re-run is a human decision — the zones are theirs to open)
+  [ "$MODE" != "fix-approved" ] && for f in $conflicts; do
     for pat in ${ESCALATE_PATTERNS:-}; do
       # shellcheck disable=SC2254
       case "$f" in
@@ -349,10 +350,23 @@ $(cat "$PLANFILE")"
 
   # approved run: feed the posted plan + newer human comments into the prompt
   approved_ctx=""
-  if [ "$MODE" = "fix-approved" ] && [ -f "$ROOT/state/plan-$IID.md" ]; then
-    approved_ctx="$(printf '\n\nApproved resolution plan (execute it):\n%s' "$(cat "$ROOT/state/plan-$IID.md")")"
-    fb="$(collect_feedback "$ROOT/state/plan-$IID.md")"
-    [ -n "$fb" ] && approved_ctx+="$(printf '\n\nHuman corrections from MR comments — these OVERRIDE the plan and the defaults:\n%s' "$fb")"
+  if [ "$MODE" = "fix-approved" ]; then
+    cutoff_file=""
+    if [ -f "$ROOT/state/plan-$IID.md" ]; then
+      approved_ctx+="$(printf '\n\nApproved resolution plan (execute it):\n%s' "$(cat "$ROOT/state/plan-$IID.md")")"
+      cutoff_file="$ROOT/state/plan-$IID.md"
+    fi
+    if [ -f "$ROOT/state/esc-$IID.md" ]; then
+      approved_ctx+="$(printf '\n\nYour earlier escalation brief (you wrote this, the human has now answered):\n%s' "$(cat "$ROOT/state/esc-$IID.md")")"
+      [ -z "$cutoff_file" ] && cutoff_file="$ROOT/state/esc-$IID.md"
+    fi
+    if [ -f "$ROOT/state/answers-$IID.md" ]; then
+      approved_ctx+="$(printf '\n\nHuman ANSWERS to your questions — these are decisions, follow them:\n%s' "$(cat "$ROOT/state/answers-$IID.md")")"
+    fi
+    if [ -n "$cutoff_file" ]; then
+      fb="$(collect_feedback "$cutoff_file")"
+      [ -n "$fb" ] && approved_ctx+="$(printf '\n\nHuman corrections from MR comments — these OVERRIDE everything above:\n%s' "$fb")"
+    fi
   fi
 
   ev AI_RESOLVE "$n file(s): $(printf '%s' "$conflicts" | tr '\n' ' ' | cut -c1-120)"
@@ -378,8 +392,13 @@ Rules:
   doubt, prefer $SRC for its own feature code and $TGT for everything else.
 - Do not rewrite anything outside the conflicted hunks. No refactoring.
 - If both sides made substantive, INCOMPATIBLE changes to the same logic and
-  neither the defaults nor the project rules decide it safely — do NOT guess:
-  write a one-line reason into a file named $ESCFILE in the repo root and stop.
+  neither the defaults nor the project rules decide it safely — do NOT guess.
+  Instead write an ESCALATION BRIEF into a file named $ESCFILE in the repo
+  root and stop. The brief is GitHub-flavored markdown with EXACTLY these
+  sections: '## Blocked' (one line: why this needs a human),
+  '## How I would resolve it' (your best resolution, concrete, per file),
+  '## Questions' (a numbered list of the specific decisions you need answered
+  — the human will answer them and re-run you).
 - After editing: git add each resolved file. Do NOT commit, do NOT push.
 - Write a summary into a file named $SUMFILE in the repo root, as
   GitHub-flavored markdown: a '### <file path>' heading per file with bullets
@@ -391,9 +410,23 @@ Rules:
   cat "$AILOG.ans" >> "$AILOG" 2>/dev/null || true
   rm -f "$AILOG.ans"
   if [ -f "$ESCFILE" ]; then
-    reason="$(head -3 "$ESCFILE" | tr '\n' ' ')"
+    cp "$ESCFILE" "$ROOT/state/esc-$IID.md" 2>/dev/null || true
+    reason="$(grep -m1 -A1 '^## Blocked' "$ESCFILE" 2>/dev/null | tail -1)"
+    [ -z "$reason" ] && reason="$(head -3 "$ESCFILE" | tr '\n' ' ')"
     git merge --abort 2>/dev/null || true
-    escalate "AI declined to guess: ${reason:-incompatible changes}"
+    ev ESCALATED "AI declined: ${reason:-incompatible changes}"; ledger ESCALATED
+    notify "${SIGIL}$IID: needs your answers" "mrwatch chat $IID"
+    post_note "## 🩹 merge-medic — escalated: I need your answers
+
+**MR:** \`$SRC\` → \`$TGT\` (${SIGIL}$IID)
+
+$(cat "$ROOT/state/esc-$IID.md")
+
+> [!NOTE]
+> Answer the questions in a comment here (or run \`mrwatch chat $IID\` locally),
+> then approve — I'll finish the resolution with your answers."
+    cleanup_wt
+    exit 2
   fi
   [ "$rc" != "0" ] && fail "resolver exited with code $rc (log: ${AILOG##*/})"
   [ -n "$(git diff --name-only --diff-filter=U)" ] && fail "unresolved files remain"

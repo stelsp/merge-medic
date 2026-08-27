@@ -161,7 +161,7 @@ type model struct {
 	root       string
 	snap       snapshot
 	sel        int // cursor within the focused panel
-	focus      int // 0 STATUS · 1 RUNS · 2 SPEND · 3 ACTIVE · 4 HISTORY · 5 HOTSPOTS · 6 LIVE
+	focus      int // 0 STATUS · 1 RUNS · 2 SPEND · 3 ACTIVE · 4 MRS · 5 HISTORY · 6 HOTSPOTS · 7 LIVE
 	selH       int // HISTORY cursor (kept when switching focus)
 	liveOff    int // lines scrolled up from the tail of LIVE (0 = follow)
 	expanded   map[string]bool
@@ -178,6 +178,7 @@ type model struct {
 	lastFeed string // newest feed line, for the typewriter effect
 	typeK    int    // typed width of the newest feed line
 	selS     int // STATUS settings cursor: 0 budget · 1 deliver · 2 model
+	selM     int // MRS cursor
 }
 
 func main() {
@@ -225,6 +226,11 @@ func (m model) activeRefs() []rowRef {
 	for _, it := range m.snap.activeRows {
 		out = append(out, rowRef{kind: "fixer", it: it})
 	}
+	return out
+}
+
+func (m model) mrRefs() []rowRef {
+	var out []rowRef
 	for _, mr := range m.snap.mrs {
 		out = append(out, rowRef{kind: "mr", mr: mr})
 	}
@@ -241,7 +247,10 @@ func (m model) histRefs() []rowRef {
 
 // focusedRows returns the row list of the panel that owns the cursor.
 func (m model) focusedRows() []rowRef {
-	if m.focus == 4 {
+	switch m.focus {
+	case 4:
+		return m.mrRefs()
+	case 5:
 		return m.histRefs()
 	}
 	return m.activeRefs()
@@ -250,10 +259,13 @@ func (m model) focusedRows() []rowRef {
 func (m model) selected() (rowRef, bool) {
 	rows := m.focusedRows()
 	sel := m.sel
-	if m.focus == 4 {
+	switch m.focus {
+	case 4:
+		sel = m.selM
+	case 5:
 		sel = m.selH
 	}
-	if (m.focus == 3 || m.focus == 4) && sel >= 0 && sel < len(rows) {
+	if m.focus >= 3 && m.focus <= 5 && sel >= 0 && sel < len(rows) {
 		return rows[sel], true
 	}
 	return rowRef{}, false
@@ -338,6 +350,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if n := len(m.histRefs()); m.selH >= n {
 			m.selH = max(0, n-1)
 		}
+		if n := len(m.mrRefs()); m.selM >= n {
+			m.selM = max(0, n-1)
+		}
 		if m.showLog {
 			if r, ok := m.selected(); ok {
 				m.logName, m.logLines = readLog(m.root, r.iid())
@@ -374,7 +389,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.expanded = map[string]bool{}
 			m.expandedMR = map[string]bool{}
 		case "tab":
-			m.focus = (m.focus + 1) % 7
+			m.focus = (m.focus + 1) % 8
 		case "up", "k":
 			if m.screen == 2 {
 				if m.selF > 0 {
@@ -392,10 +407,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.sel--
 				}
 			case 4:
+				if m.selM > 0 {
+					m.selM--
+				}
+			case 5:
 				if m.selH > 0 {
 					m.selH--
 				}
-			case 6:
+			case 7:
 				m.liveOff++
 			}
 		case "down", "j":
@@ -415,10 +434,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.sel++
 				}
 			case 4:
+				if m.selM < len(m.mrRefs())-1 {
+					m.selM++
+				}
+			case 5:
 				if m.selH < len(m.histRefs())-1 {
 					m.selH++
 				}
-			case 6:
+			case 7:
 				m.liveOff = max(0, m.liveOff-1)
 			}
 		case "enter", "e":
@@ -430,7 +453,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.screen = 4
 				break
 			}
-			if m.screen == 0 && m.focus == 5 {
+			if m.screen == 0 && m.focus == 6 {
 				m.screen = 5
 				break
 			}
@@ -500,6 +523,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			setConfigVal(m.root, "DAILY_AGENT_RUNS", strconv.Itoa(cur))
 			m.snap.budgetMax = strconv.Itoa(cur)
+		case "c":
+			if r, ok := m.selected(); ok {
+				iid := r.iid()
+				if _, err := os.Stat(filepath.Join(m.root, "state", "esc-"+iid+".md")); err == nil {
+					mrw := filepath.Join(m.root, "bin", "mrwatch")
+					if runtime.GOOS == "darwin" {
+						script := fmt.Sprintf("tell application \"Terminal\" to do script \"bash %s chat %s\"", mrw, iid)
+						_ = exec.Command("osascript", "-e", script, "-e", `tell application "Terminal" to activate`).Start()
+					} else {
+						_ = exec.Command("x-terminal-emulator", "-e", "bash", mrw, "chat", iid).Start()
+					}
+				}
+			}
 		case "R":
 			if r, ok := m.selected(); ok {
 				iid := r.iid()
@@ -686,7 +722,7 @@ func (m model) renderHistRow(it item, idx int, aw int) string {
 		dim.Render(time.Unix(it.t0, 0).Format("02.01 15:04")),
 		style.Render(fmt.Sprintf("%-10s", it.phase)), dur,
 		dim.Render(tag), dim.Render(trunc(detail, aw-48)))
-	if idx == m.selH && m.focus == 4 {
+	if idx == m.selH && m.focus == 5 {
 		row = selMark(row, aw)
 	}
 	if m.expanded[it.key()] {
@@ -901,24 +937,20 @@ func (m model) View() string {
 	}
 
 	// ── ACTIVE (fixers + open MRs + radar), then HISTORY, stacked ─────────────
-	idx := 0
 	aw := lw - 4 // content width inside border+padding
 	hw := lw - 4
-	actSelIdx := 0
 	var act []string
 	fixing := map[string]bool{}
-	for _, it := range s.activeRows {
-		if idx == m.sel {
-			actSelIdx = len(act)
-		}
+	for idx, it := range s.activeRows {
 		act = append(act, m.renderRow(it, idx, now, aw))
 		fixing[it.iid] = true
-		idx++
 	}
+	if len(act) == 0 {
+		act = append(act, dim.Render(" no active fixers"))
+	}
+	mrSelIdx := 0
+	var mrsRows []string
 	if len(s.mrs) > 0 {
-		if len(act) > 0 {
-			act = append(act, dim.Render(strings.Repeat("─", max(1, aw-1))))
-		}
 		// when every MR targets the same branch, drop the "→target" noise
 		// (the shared target moves into the panel title meta)
 		commonTgt := ""
@@ -983,8 +1015,8 @@ func (m model) View() string {
 					gear = dim.Render("d ")
 				}
 			}
-			if idx == m.sel {
-				actSelIdx = len(act)
+			if i == m.selM {
+				mrSelIdx = len(mrsRows)
 			}
 			age := fmtAge(now - mr.updated)
 			if mr.updated == 0 {
@@ -1000,7 +1032,7 @@ func (m model) View() string {
 				dim.Render(fmt.Sprintf("%3s", age)),
 				dim.Render(fmt.Sprintf("%-8s", trunc(mr.author, 8))),
 				titleStyled(title, tstyle, aw-(31+bcol)))
-			if idx == m.sel && m.focus == 3 {
+			if i == m.selM && m.focus == 4 {
 				row = selMark(row, aw)
 			}
 			if m.expandedMR[mr.iid] {
@@ -1019,13 +1051,12 @@ func (m model) View() string {
 					row += "\n      " + yellow.Render(trunc("⚡ clashes with "+strings.Join(clashes, " "), aw-6))
 				}
 			}
-			act = append(act, row)
-			idx++
+			mrsRows = append(mrsRows, row)
 		}
 	}
-	act = append(act, m.mrsRadar(aw)...)
-	if len(act) == 0 {
-		act = append(act, dim.Render(" no open MRs"))
+	mrsRows = append(mrsRows, m.mrsRadar(aw)...)
+	if len(mrsRows) == 0 {
+		mrsRows = append(mrsRows, dim.Render(" no open MRs"))
 	}
 	var hist []string
 	if len(s.histRows) == 0 {
@@ -1072,18 +1103,25 @@ func (m model) View() string {
 	if avail < 24 {
 		histH = 5
 	}
-	actH := avail - topH - hsH - histH
-	if actH < 6 {
+	// ACTIVE (fixers) is small and fixed; MRS takes the rest
+	actH := len(act) + 2
+	if actH > 6 {
 		actH = 6
 	}
-	actBoxH, histBoxH := 0, 0
-	if wide {
-		act = windowRows(act, actSelIdx, actH-2)
-		hist = windowRows(hist, m.selH, histH-2)
-		actBoxH, histBoxH = actH-2, histH-2
+	mrsH := avail - topH - actH - hsH - histH
+	if mrsH < 6 {
+		mrsH = 6
 	}
-	lb.WriteString(titledBox(lw, "ACTIVE", actMeta, strings.Join(act, "\n"), actBoxH, m.focus == 3) + "\n")
-	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), histBoxH, m.focus == 4) + "\n")
+	actBoxH, mrsBoxH, histBoxH := 0, 0, 0
+	if wide {
+		act = windowRows(act, min(m.sel, max(0, len(act)-1)), actH-2)
+		mrsRows = windowRows(mrsRows, mrSelIdx, mrsH-2)
+		hist = windowRows(hist, m.selH, histH-2)
+		actBoxH, mrsBoxH, histBoxH = actH-2, mrsH-2, histH-2
+	}
+	lb.WriteString(titledBox(lw, "ACTIVE", fmt.Sprintf("%d fixers", len(s.activeRows)), strings.Join(act, "\n"), actBoxH, m.focus == 3) + "\n")
+	lb.WriteString(titledBox(lw, "MRS", actMeta, strings.Join(mrsRows, "\n"), mrsBoxH, m.focus == 4) + "\n")
+	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), histBoxH, m.focus == 5) + "\n")
 
 	if len(s.hotspots) > 0 && (hsH > 0 || !wide) {
 		maxC := s.hotspots[0].count
@@ -1100,7 +1138,7 @@ func (m model) View() string {
 				yellow.Render(strings.Repeat("▪", max(1, h.count*10/maxC))),
 				dim.Render(trunc(h.file, lw-24))))
 		}
-		lb.WriteString(titledBox(lw, "HOTSPOTS", "most-conflicted files", strings.Join(hs, "\n"), 0, m.focus == 5) + "\n")
+		lb.WriteString(titledBox(lw, "HOTSPOTS", "most-conflicted files", strings.Join(hs, "\n"), 0, m.focus == 6) + "\n")
 	}
 
 	if m.showLog {
@@ -1160,12 +1198,12 @@ func (m model) View() string {
 			wl = wl[start:end]
 			// with LIVE focused, the cursor line sits at the bottom of the
 			// window and j/k walk it line by line
-			if m.focus == 6 && len(wl) > 0 {
+			if m.focus == 7 && len(wl) > 0 {
 				wl[len(wl)-1] = selMark(wl[len(wl)-1], liveW-4)
 			}
 			body = strings.Join(wl, "\n")
 		}
-		liveBox := titledBox(liveW, "LIVE", badge, body, total-2, m.focus == 6)
+		liveBox := titledBox(liveW, "LIVE", badge, body, total-2, m.focus == 7)
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, liveBox) + "\n")
 	} else {
 		b.WriteString(lb.String())
@@ -1543,9 +1581,30 @@ func (m model) fleetView() string {
 		if conf > 0 {
 			st = red.Render(fmt.Sprintf(" %d✗", conf))
 		}
-		row := fmt.Sprintf(" %s%s %s %s · daemon %s · ai %s today%s", cur,
+		// live work: non-terminal progress files younger than an hour
+		working := 0
+		progFiles, _ := filepath.Glob(filepath.Join(root, "state", "progress-*.log"))
+		for _, pf := range progFiles {
+			if fi, err := os.Stat(pf); err != nil || time.Since(fi.ModTime()) > time.Hour {
+				continue
+			}
+			if data, err := os.ReadFile(pf); err == nil {
+				ls := nonEmpty(strings.Split(string(data), "\n"))
+				if len(ls) > 0 {
+					lp := strings.SplitN(ls[len(ls)-1], "|", 3)
+					if len(lp) > 1 && !terminal(lp[1]) {
+						working++
+					}
+				}
+			}
+		}
+		wk := ""
+		if working > 0 {
+			wk = amber.Render(fmt.Sprintf(" ⚙ %d fixing", working))
+		}
+		row := fmt.Sprintf(" %s%s %s %s · daemon %s · ai %s today%s%s", cur,
 			bold.Render(fmt.Sprintf("%-16s", name)), dim.Render(fmt.Sprintf("%-7s", pv)),
-			trunc(pp, 40), d, spent, st)
+			trunc(pp, 40), d, spent, st, wk)
 		if i == m.selF {
 			row = selMark(row, m.width-4)
 		}
@@ -1561,10 +1620,11 @@ func (m model) helpView() string {
 		{"↑↓ / j k", "move selection"},
 		{"enter / e", "details: phase timeline (runs) / MR info + clashes (MRs)"},
 		{"o", "open the selected MR/PR in the browser"},
-		{"tab", "cycle focus: STATUS → RUNS → SPEND → ACTIVE → HISTORY → HOTSPOTS → LIVE"},
+		{"tab", "cycle focus: STATUS → RUNS → SPEND → ACTIVE → MRS → HISTORY → HOTSPOTS → LIVE"},
 		{"enter", "on focused RUNS / SPEND / HOTSPOTS: full-screen breakdown"},
 		{"+ / -", "budget shortcut while STATUS is focused (0 = unlimited)"},
 		{"← →", "change the selected STATUS setting (budget / delivery / model)"},
+		{"c", "chat with the bot about the selected ESCALATED MR (opens a terminal window)"},
 		{"R", "retry the selected MR: clears tried/deferred marks and ticks (use after fixing an ESCALATED/FAIL cause)"},
 		{"1 / 2", "screens: main dashboard / fleet (instances)"},
 		{"l", "toggle AI/fixer log panel for the selected MR"},

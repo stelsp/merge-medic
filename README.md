@@ -74,8 +74,12 @@ cannot commit or push. `RESOLVE_POLICY_FILE` appends your project rules
 (e.g. *"in `migrations/` keep both sides"*).
 
 When guessing would be dangerous, the bot **doesn't**: conflicts under
-`ESCALATE_PATTERNS`, and cases the AI itself judges incompatible, end as
-`ESCALATED (needs human)`. With `POST_RESOLUTION_NOTE=1` the resolver's
+`ESCALATE_PATTERNS` end as `ESCALATED (needs human)`, and when the AI itself
+judges the sides incompatible it escalates with a **brief**: how it would
+resolve the conflict, and the numbered questions it needs answered. Answer
+them — in an MR comment, or interactively via `mrwatch chat <iid>` (`c` on
+the escalated row in the dashboard) — approve, and the bot finishes the
+resolution with your decisions. With `POST_RESOLUTION_NOTE=1` the resolver's
 per-file reasoning — or the escalation reason — is posted to the MR, so the
 reviewer always sees what the bot did and why.
 
@@ -175,6 +179,7 @@ dashboards.
 
 ```
 mrwatch             the dashboard (plain-text status when piped)
+mrwatch chat <iid>  answer an escalated MR's questions, resume the fix
 mrwatch setup       interactive helper: deps, logins, config, scheduler
 mrwatch log -f      follow the watcher log
 mrwatch agent <iid> AI resolver log for one MR
@@ -183,9 +188,8 @@ mrwatch pause/resume
 ```
 
 Everything live (event feed, open MRs, history, logs) is inside the
-dashboard — one window. With several instances installed, plain `mrwatch`
-asks which project to open first; suffixed commands (`mrwatch-gh …`) go
-straight to theirs.
+dashboard — one window; the fleet screen (`2`) switches between installed
+instances, and suffixed commands (`mrwatch-gh …`) open theirs directly.
 
 The dashboard is **`mrtop`** — a Go /
 [bubbletea](https://github.com/charmbracelet/bubbletea) ops console built by
