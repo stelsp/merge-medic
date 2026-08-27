@@ -128,6 +128,29 @@ fi
 cd "$WATCH_REPO"
 git fetch --prune --quiet origin || fail "git fetch failed"
 
+# ── defer while humans / other agent sessions are still working ───────────────
+# Retry happens naturally: watch.sh skips this MR until the deferred marker
+# ages past QUIET_MINUTES, then clears it together with the tried marker.
+defer() {
+  ev DEFERRED "$1 — retry in ~${QUIET_MINUTES:-15}m"
+  date +%s > "$ROOT/state/deferred-$IID"
+  cleanup_wt
+  exit 0
+}
+if [ "${QUIET_MINUTES:-0}" -gt 0 ]; then
+  head_ts="$(git log -1 --format=%ct "origin/$SRC" 2>/dev/null || echo 0)"
+  if [ "$head_ts" -gt 0 ]; then
+    age_m=$(( ($(date +%s) - head_ts) / 60 ))
+    [ "$age_m" -lt "$QUIET_MINUTES" ] && defer "branch pushed ${age_m}m ago — someone is working on it"
+  fi
+  for ur in ${USER_REPOS:-}; do
+    uwt="$(git -C "$ur" worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$SRC" '$1=="worktree"{w=$2} $1=="branch"&&$2==b{print w; exit}')"
+    if [ -n "$uwt" ] && [ -n "$(git -C "$uwt" status --porcelain 2>/dev/null | head -1)" ]; then
+      defer "uncommitted work in $uwt"
+    fi
+  done
+fi
+
 ev WORKTREE "$WT"
 cleanup_wt
 git worktree add --force "$WT" -B "$SRC" "origin/$SRC" >/dev/null 2>&1 \

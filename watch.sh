@@ -94,6 +94,16 @@ consider() {
     rm -f "$STATE/approve-$iid"
   fi
 
+  # deferred (branch was hot): stay quiet until the quiet period passes, then
+  # clear the markers so the fix is attempted again
+  if [ -f "$STATE/deferred-$iid" ]; then
+    dts="$(cat "$STATE/deferred-$iid")"
+    if [ $(( $(date +%s) - dts )) -lt $(( ${QUIET_MINUTES:-15} * 60 )) ]; then
+      return 0
+    fi
+    rm -f "$STATE/deferred-$iid" "$STATE/$MARK-$iid"
+  fi
+
   # this exact commit pair was already tried and failed — don't burn tokens again
   if [ -f "$STATE/$MARK-$iid" ] && [ "$(cat "$STATE/$MARK-$iid")" = "$ssha:$tsha" ]; then
     return 0
