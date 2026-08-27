@@ -268,17 +268,28 @@ case "$cmd" in
     echo "${B}── the bot is blocked on $iid ─────────────────────────${N}"
     cat "$BRIEF"
     echo
-    echo "${B}── your answers${N} ${DIM}(end with an empty line; they are fed back verbatim)${N}"
-    : > "$ANS"
-    while IFS= read -r line; do
-      [ -z "$line" ] && break
-      printf '%s
+    if [ "${RESOLVER:-claude}" = "claude" ] && command -v claude >/dev/null 2>&1; then
+      # a REAL chat: the resolver agent interviews you about its questions,
+      # then writes the agreed decisions to state/answers-<iid>.md itself
+      echo "${B}── opening the resolver chat${N} ${DIM}(exit the chat when you are done)${N}"
+      claude "You are merge-medic's conflict resolver. You are BLOCKED on MR/PR $iid and escalated with the brief below. Your job in THIS chat: interview the user about the numbered questions — one question at a time, demand concrete decisions, challenge vague answers (grill-me style), keep it short. You may inspect the repo clone to ground the discussion. When every question has a concrete decision: write them as a numbered markdown list to the file $ANS (create it), print the summary, and tell the user to exit the chat — the fix resumes with those answers.
+
+Your escalation brief:
+$(cat "$BRIEF")"         --model "${CLAUDE_MODEL:-sonnet}"         --add-dir "$ROOT/state" ${WATCH_REPO:+--add-dir "$WATCH_REPO"} || true
+    fi
+    if [ ! -s "$ANS" ]; then
+      echo "${B}── no answers file yet — type them manually${N} ${DIM}(end with an empty line)${N}"
+      : > "$ANS"
+      while IFS= read -r line; do
+        [ -z "$line" ] && break
+        printf '%s
 ' "$line" >> "$ANS"
-    done
+      done
+    fi
     if [ ! -s "$ANS" ]; then
       echo "no answers recorded — nothing changes"; rm -f "$ANS"; exit 0
     fi
-    echo "${GRN}saved${N} → state/answers-$iid.md"
+    echo "${GRN}answers ready${N} → state/answers-$iid.md"
     read -rp "continue the fix now with these answers? [Y/n] " a
     case "$a" in
       n|N) echo "ok — approve later from the dashboard (a) or: touch state/approve-$iid && mrwatch run" ;;
