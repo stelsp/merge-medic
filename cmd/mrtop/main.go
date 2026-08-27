@@ -190,6 +190,9 @@ func main() {
 		if c, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && c > 40 {
 			m.width = c
 		}
+		if l, err := strconv.Atoi(os.Getenv("LINES")); err == nil && l > 10 {
+			m.height = l
+		}
 		m.frame = 100  // full banner name in snapshots
 		m.typeK = 1 << 20 // no mid-typing line in snapshots
 
@@ -345,7 +348,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastFeed = m.snap.feed[n-1]
 				m.typeK = 0 // a fresh line starts typing itself
 			} else {
-				m.typeK += 8
+				m.typeK += 12
 			}
 		}
 		m.frame++
@@ -497,6 +500,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			setConfigVal(m.root, "DAILY_AGENT_RUNS", strconv.Itoa(cur))
 			m.snap.budgetMax = strconv.Itoa(cur)
+		case "R":
+			if r, ok := m.selected(); ok {
+				iid := r.iid()
+				_ = os.Remove(filepath.Join(m.root, "state", "tried-"+iid))
+				_ = os.Remove(filepath.Join(m.root, "state", "dry-"+iid))
+				_ = os.Remove(filepath.Join(m.root, "state", "deferred-"+iid))
+				c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
+				_ = c.Start()
+			}
 		case "r":
 			c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
 			_ = c.Start()
@@ -892,9 +904,13 @@ func (m model) View() string {
 	idx := 0
 	aw := lw - 4 // content width inside border+padding
 	hw := lw - 4
+	actSelIdx := 0
 	var act []string
 	fixing := map[string]bool{}
 	for _, it := range s.activeRows {
+		if idx == m.sel {
+			actSelIdx = len(act)
+		}
 		act = append(act, m.renderRow(it, idx, now, aw))
 		fixing[it.iid] = true
 		idx++
@@ -967,6 +983,9 @@ func (m model) View() string {
 					gear = dim.Render("d ")
 				}
 			}
+			if idx == m.sel {
+				actSelIdx = len(act)
+			}
 			age := fmtAge(now - mr.updated)
 			if mr.updated == 0 {
 				age = "  "
@@ -1038,10 +1057,35 @@ func (m model) View() string {
 	if nConf > 0 {
 		actMeta = fmt.Sprintf("%d MRs · %d✗%s", len(s.mrs), nConf, tgtMeta)
 	}
-	lb.WriteString(titledBox(lw, "ACTIVE", actMeta, strings.Join(act, "\n"), 0, m.focus == 3) + "\n")
-	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), 0, m.focus == 4) + "\n")
+	// fixed vertical budget: panels never push the interface off-screen —
+	// lists window around their cursor instead (↑/↓ markers show the rest)
+	avail := m.height - 3 // banner + footer
+	if m.height < 14 {
+		avail = m.height - 1
+	}
+	topH := 6
+	hsH := 0
+	if len(s.hotspots) > 0 && avail >= 26 {
+		hsH = 6
+	}
+	histH := 7
+	if avail < 24 {
+		histH = 5
+	}
+	actH := avail - topH - hsH - histH
+	if actH < 6 {
+		actH = 6
+	}
+	actBoxH, histBoxH := 0, 0
+	if wide {
+		act = windowRows(act, actSelIdx, actH-2)
+		hist = windowRows(hist, m.selH, histH-2)
+		actBoxH, histBoxH = actH-2, histH-2
+	}
+	lb.WriteString(titledBox(lw, "ACTIVE", actMeta, strings.Join(act, "\n"), actBoxH, m.focus == 3) + "\n")
+	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), histBoxH, m.focus == 4) + "\n")
 
-	if len(s.hotspots) > 0 {
+	if len(s.hotspots) > 0 && (hsH > 0 || !wide) {
 		maxC := s.hotspots[0].count
 		if maxC < 1 {
 			maxC = 1
@@ -1156,6 +1200,63 @@ func (m model) View() string {
 		key("o", "open") + sep + key("a", "approve") + sep + key("2", "fleet") + sep +
 		key("?", "help") + sep + key("q", "quit"))
 	return b.String()
+}
+
+// windowRows fits multi-line items into capLines, keeping the selected item
+// fully visible and filling around it; ↑/↓ markers show hidden rows exist.
+func windowRows(items []string, selIdx, capLines int) []string {
+	if capLines <= 0 || len(items) == 0 {
+		return nil
+	}
+	if selIdx < 0 || selIdx >= len(items) {
+		selIdx = 0
+	}
+	h := func(x string) int { return strings.Count(x, "\n") + 1 }
+	total := 0
+	for _, it := range items {
+		total += h(it)
+	}
+	if total <= capLines {
+		return items
+	}
+	budget := capLines - 1 // reserve a line for the overflow markers
+	out := []string{items[selIdx]}
+	used := h(items[selIdx])
+	up, down := selIdx-1, selIdx+1
+	for used < budget && (up >= 0 || down < len(items)) {
+		if up >= 0 {
+			if hh := h(items[up]); used+hh <= budget {
+				out = append([]string{items[up]}, out...)
+				used += hh
+				up--
+			} else {
+				up = -1
+			}
+		}
+		if down < len(items) && used < budget {
+			if hh := h(items[down]); used+hh <= budget {
+				out = append(out, items[down])
+				used += hh
+				down++
+			} else {
+				down = len(items)
+			}
+		}
+	}
+	marks := ""
+	if up >= 0 {
+		marks += fmt.Sprintf("↑ %d above", up+1)
+	}
+	if down < len(items) {
+		if marks != "" {
+			marks += " · "
+		}
+		marks += fmt.Sprintf("↓ %d below", len(items)-down)
+	}
+	if marks != "" {
+		out = append(out, dim.Render("  "+marks))
+	}
+	return out
 }
 
 // padTo pads an ANSI-styled string to a visual width (Sprintf counts bytes).
@@ -1464,6 +1565,7 @@ func (m model) helpView() string {
 		{"enter", "on focused RUNS / SPEND / HOTSPOTS: full-screen breakdown"},
 		{"+ / -", "budget shortcut while STATUS is focused (0 = unlimited)"},
 		{"← →", "change the selected STATUS setting (budget / delivery / model)"},
+		{"R", "retry the selected MR: clears tried/deferred marks and ticks (use after fixing an ESCALATED/FAIL cause)"},
 		{"1 / 2", "screens: main dashboard / fleet (instances)"},
 		{"l", "toggle AI/fixer log panel for the selected MR"},
 		{"a", "approve the selected PLANNED plan (semi-auto branches)"},
