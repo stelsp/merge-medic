@@ -1173,6 +1173,14 @@ func (m model) View() string {
 	return b.String()
 }
 
+// padTo pads an ANSI-styled string to a visual width (Sprintf counts bytes).
+func padTo(sv string, w int) string {
+	if pad := w - lipgloss.Width(sv); pad > 0 {
+		return sv + strings.Repeat(" ", pad)
+	}
+	return sv
+}
+
 // runsDetailView — enter on RUNS: per-day outcome table for two weeks.
 func (m model) runsDetailView() string {
 	s := m.snap
@@ -1217,27 +1225,33 @@ func (m model) runsDetailView() string {
 		}
 	}
 	var rows []string
-	rows = append(rows, dim.Render("  day    fixes                              ✓    ✗    ⚑   clean/ai"))
+	rows = append(rows, dim.Render("  day    activity              ✓   ✗   ⚑   clean/ai"))
 	for i, d := range days {
 		date := time.Unix(day0+86400-int64(14-i)*86400, 0).Format("02.01")
 		total := d.done + d.fail + d.esc
-		bw := 0
-		if total > 0 {
-			bw = max(1, total*24/maxN)
+		if total == 0 {
+			rows = append(rows, dim.Render("  "+date+"   ·"))
+			continue
 		}
-		bar := green.Render(strings.Repeat("█", bw*d.done/max(total, 1))) +
-			red.Render(strings.Repeat("█", bw*d.fail/max(total, 1))) +
-			yellow.Render(strings.Repeat("█", bw*d.esc/max(total, 1)))
-		rows = append(rows, fmt.Sprintf("  %s  %-24s %s %s %s   %d/%d",
-			dim.Render(date), bar,
+		bw := max(1, total*18/maxN)
+		bar := green.Render(strings.Repeat("█", bw*d.done/total)) +
+			red.Render(strings.Repeat("█", bw*d.fail/total)) +
+			yellow.Render(strings.Repeat("█", bw*d.esc/total))
+		rows = append(rows, fmt.Sprintf("  %s  %s%s %s %s   %s",
+			dim.Render(date), padTo(bar, 20),
 			green.Render(fmt.Sprintf("%3d", d.done)), red.Render(fmt.Sprintf("%3d", d.fail)),
-			yellow.Render(fmt.Sprintf("%3d", d.esc)), d.clean, d.ai))
+			yellow.Render(fmt.Sprintf("%3d", d.esc)),
+			dim.Render(fmt.Sprintf("%d/%d", d.clean, d.ai))))
 	}
 	rows = append(rows, "",
 		fmt.Sprintf("  all time: %s %s %s · %d clean merges · %d AI resolutions",
 			green.Render(fmt.Sprintf("%d✓", s.tok)), red.Render(fmt.Sprintf("%d✗", s.tbad)),
 			yellow.Render(fmt.Sprintf("%d⚑", s.tesc)), s.tclean, s.tai))
-	b.WriteString(titledBox(m.width, "RUNS · 14 days", "", strings.Join(rows, "\n"), 0, true) + "\n")
+	bw := m.width
+	if bw > 72 {
+		bw = 72
+	}
+	b.WriteString(titledBox(bw, "RUNS", "last 14 days", strings.Join(rows, "\n"), 0, true) + "\n")
 	b.WriteString(" " + amber.Render("esc") + dim.Render(" back · ") + amber.Render("q") + dim.Render(" quit"))
 	return b.String()
 }
@@ -1259,9 +1273,13 @@ func (m model) spendDetailView() string {
 	rows = append(rows, dim.Render("  day    spend"))
 	for i, v := range s.spendDaily {
 		date := time.Unix(day0+86400-int64(14-i)*86400, 0).Format("02.01")
-		bw := int(v / maxS * 24)
-		rows = append(rows, fmt.Sprintf("  %s  %-24s $%.2f",
-			dim.Render(date), amber.Render(strings.Repeat("█", bw)), v))
+		if v < 0.005 {
+			rows = append(rows, dim.Render("  "+date+"   ·"))
+			continue
+		}
+		bar := amber.Render(strings.Repeat("█", max(1, int(v/maxS*18))))
+		rows = append(rows, fmt.Sprintf("  %s  %s $%.2f",
+			dim.Render(date), padTo(bar, 20), v))
 	}
 	rows = append(rows, "",
 		fmt.Sprintf("  today ≈$%.2f · all time $%.2f", s.spendToday, s.spend),
@@ -1276,7 +1294,11 @@ func (m model) spendDetailView() string {
 			dim.Render(fmt.Sprintf("%-14s", trunc(short, 14))),
 			dim.Render(time.Unix(r.ts, 0).Format("02.01 15:04"))))
 	}
-	b.WriteString(titledBox(m.width, "SPEND", "", strings.Join(rows, "\n"), 0, true) + "\n")
+	bw2 := m.width
+	if bw2 > 72 {
+		bw2 = 72
+	}
+	b.WriteString(titledBox(bw2, "SPEND", "last 14 days + top runs", strings.Join(rows, "\n"), 0, true) + "\n")
 	b.WriteString(" " + amber.Render("esc") + dim.Render(" back · ") + amber.Render("q") + dim.Render(" quit"))
 	return b.String()
 }
