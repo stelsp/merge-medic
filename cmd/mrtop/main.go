@@ -48,8 +48,13 @@ var (
 
 // titledBox renders a panel of total width w with the title (and an optional
 // dim meta like a count) embedded in the top border: ┌─ ACTIVE ─ 12 ──────┐
-func titledBox(w int, title, meta, body string, height int) string {
+func titledBox(w int, title, meta, body string, height int, focused bool) string {
 	st := section.Width(w - 2)
+	bs := borderC
+	if focused {
+		st = st.BorderForeground(lipgloss.Color("214"))
+		bs = amber
+	}
 	if height > 0 {
 		st = st.Height(height)
 	}
@@ -63,7 +68,7 @@ func titledBox(w int, title, meta, body string, height int) string {
 	if rest < 0 {
 		rest = 0
 	}
-	top := borderC.Render("┌─") + label + borderC.Render(strings.Repeat("─", rest)+"┐")
+	top := bs.Render("┌─") + label + bs.Render(strings.Repeat("─", rest)+"┐")
 	return top + "\n" + inner
 }
 
@@ -133,7 +138,10 @@ type tickMsg time.Time
 type model struct {
 	root       string
 	snap       snapshot
-	sel        int
+	sel        int // cursor within the focused panel
+	focus      int // 0 = ACTIVE, 1 = HISTORY, 2 = LIVE
+	selH       int // HISTORY cursor (kept when switching focus)
+	liveOff    int // lines scrolled up from the tail of LIVE (0 = follow)
 	expanded   map[string]bool
 	expandedMR map[string]bool
 	showLog  bool
@@ -181,7 +189,7 @@ type rowRef struct {
 	mr   mrState
 }
 
-func (m model) rowRefs() []rowRef {
+func (m model) activeRefs() []rowRef {
 	var out []rowRef
 	for _, it := range m.snap.activeRows {
 		out = append(out, rowRef{kind: "fixer", it: it})
@@ -189,16 +197,33 @@ func (m model) rowRefs() []rowRef {
 	for _, mr := range m.snap.mrs {
 		out = append(out, rowRef{kind: "mr", mr: mr})
 	}
+	return out
+}
+
+func (m model) histRefs() []rowRef {
+	var out []rowRef
 	for _, it := range m.snap.histRows {
 		out = append(out, rowRef{kind: "hist", it: it})
 	}
 	return out
 }
 
+// focusedRows returns the row list of the panel that owns the cursor.
+func (m model) focusedRows() []rowRef {
+	if m.focus == 1 {
+		return m.histRefs()
+	}
+	return m.activeRefs()
+}
+
 func (m model) selected() (rowRef, bool) {
-	rows := m.rowRefs()
-	if m.sel >= 0 && m.sel < len(rows) {
-		return rows[m.sel], true
+	rows := m.focusedRows()
+	sel := m.sel
+	if m.focus == 1 {
+		sel = m.selH
+	}
+	if m.focus != 2 && sel >= 0 && sel < len(rows) {
+		return rows[sel], true
 	}
 	return rowRef{}, false
 }
@@ -240,8 +265,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case tickMsg:
 		m.snap = readSnapshot(m.root, m.width)
-		if n := len(m.rowRefs()); m.sel >= n {
+		if n := len(m.activeRefs()); m.sel >= n {
 			m.sel = max(0, n-1)
+		}
+		if n := len(m.histRefs()); m.selH >= n {
+			m.selH = max(0, n-1)
 		}
 		if m.showLog {
 			if r, ok := m.selected(); ok {
@@ -259,15 +287,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.showHelp = false
 			m.showLog = false
+			m.liveOff = 0
 			m.expanded = map[string]bool{}
 			m.expandedMR = map[string]bool{}
+		case "tab":
+			m.focus = (m.focus + 1) % 3
 		case "up", "k":
-			if m.sel > 0 {
-				m.sel--
+			switch m.focus {
+			case 0:
+				if m.sel > 0 {
+					m.sel--
+				}
+			case 1:
+				if m.selH > 0 {
+					m.selH--
+				}
+			case 2:
+				m.liveOff += 3
 			}
 		case "down", "j":
-			if m.sel < len(m.rowRefs())-1 {
-				m.sel++
+			switch m.focus {
+			case 0:
+				if m.sel < len(m.activeRefs())-1 {
+					m.sel++
+				}
+			case 1:
+				if m.selH < len(m.histRefs())-1 {
+					m.selH++
+				}
+			case 2:
+				m.liveOff = max(0, m.liveOff-3)
 			}
 		case "enter", "e":
 			if r, ok := m.selected(); ok {
@@ -307,6 +356,59 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// phaseSlot maps a phase to its position on the fixer's path.
+func phaseSlot(ph string) int {
+	switch ph {
+	case "START":
+		return 0
+	case "WORKTREE":
+		return 1
+	case "MERGE":
+		return 2
+	case "MERGE_CLEAN", "AI_RESOLVE", "PLAN":
+		return 3
+	case "VERIFY":
+		return 4
+	case "TESTS":
+		return 5
+	case "REGRESSION":
+		return 6
+	case "PUSH":
+		return 7
+	}
+	return 8
+}
+
+// segBar renders the 8-segment phase path: done green, current pulsing
+// amber, future dim. Terminal phases paint the whole bar by outcome.
+func segBar(ph string, frame int) string {
+	switch ph {
+	case "DONE", "PLANNED":
+		return green.Render(strings.Repeat("█", 8))
+	case "FAIL", "ESCALATED":
+		return red.Render(strings.Repeat("█", 8))
+	case "DEFERRED":
+		return dim.Render(strings.Repeat("░", 8))
+	}
+	slot := phaseSlot(ph)
+	cur := "█"
+	if frame%2 == 1 {
+		cur = "▓"
+	}
+	var b strings.Builder
+	for i := 0; i < 8; i++ {
+		switch {
+		case i < slot:
+			b.WriteString(green.Render("█"))
+		case i == slot:
+			b.WriteString(amber.Render(cur))
+		default:
+			b.WriteString(dim.Render("░"))
+		}
+	}
+	return b.String()
 }
 
 func outcomeMark(phase string) string {
@@ -358,16 +460,13 @@ func (m model) renderRow(it item, idx int, now int64, aw int) string {
 	if tag == "" || tag == "none" {
 		tag = "  "
 	}
-	bw := 20
-	if aw < 90 {
-		bw = 12
-	}
-	row := fmt.Sprintf(" %s %s %s [%s] %3d%%  %s %3dm%02ds %-5s %s",
+	_ = pct
+	row := fmt.Sprintf(" %s %s %s %s  %s %3dm%02ds %-5s %s",
 		mark, bold.Render(fmt.Sprintf("!%-4s", it.iid)), dim.Render(when),
-		bar(pct, bw), pct,
+		segBar(it.phase, m.frame),
 		style.Render(fmt.Sprintf("%-10s", it.phase)), el/60, el%60,
-		dim.Render(tag), dim.Render(trunc(it.detail, aw-(49+bw))))
-	if idx == m.sel {
+		dim.Render(tag), dim.Render(trunc(it.detail, aw-48)))
+	if idx == m.sel && m.focus == 0 {
 		row = selRow.Render(row)
 	}
 	if m.expanded[it.key()] {
@@ -406,7 +505,7 @@ func (m model) renderHistRow(it item, idx int, aw int) string {
 		dim.Render(time.Unix(it.t0, 0).Format("02.01 15:04")),
 		style.Render(fmt.Sprintf("%-10s", it.phase)), dur,
 		dim.Render(tag), dim.Render(trunc(detail, aw-48)))
-	if idx == m.sel {
+	if idx == m.selH && m.focus == 1 {
 		row = selRow.Render(row)
 	}
 	if m.expanded[it.key()] {
@@ -521,7 +620,7 @@ func (m model) View() string {
 	}
 
 	box := func(w int, title, body string) string {
-		return titledBox(w, title, "", body, 0)
+		return titledBox(w, title, "", body, 0, false)
 	}
 
 	// ── layout: left column (status strip, ACTIVE, HISTORY) + LIVE at right ──
@@ -568,7 +667,7 @@ func (m model) View() string {
 		w3 := lw - w1 - w2
 		h := max(len(statusLines), max(len(runLines), len(spendLines)))
 		boxH := func(w int, title, body string) string {
-			return titledBox(w, title, "", body, h)
+			return titledBox(w, title, "", body, h, false)
 		}
 		lb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top,
 			boxH(w1, "STATUS", strings.Join(statusLines, "\n")),
@@ -638,7 +737,7 @@ func (m model) View() string {
 				dim.Render(fmt.Sprintf("%3s", age)),
 				dim.Render(fmt.Sprintf("%-8s", trunc(mr.author, 8))),
 				tstyle.Render(trunc(title, aw-(29+bcol))))
-			if idx == m.sel {
+			if idx == m.sel && m.focus == 0 {
 				row = selRow.Render(row)
 			}
 			if m.expandedMR[mr.iid] {
@@ -669,12 +768,11 @@ func (m model) View() string {
 	if len(s.histRows) == 0 {
 		hist = append(hist, dim.Render(" no runs yet"))
 	}
-	for _, it := range s.histRows {
-		hist = append(hist, m.renderHistRow(it, idx, hw))
-		idx++
+	for hIdx, it := range s.histRows {
+		hist = append(hist, m.renderHistRow(it, hIdx, hw))
 	}
-	lb.WriteString(titledBox(lw, "ACTIVE", fmt.Sprintf("%d MRs", len(s.mrs)), strings.Join(act, "\n"), 0) + "\n")
-	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), 0) + "\n")
+	lb.WriteString(titledBox(lw, "ACTIVE", fmt.Sprintf("%d MRs", len(s.mrs)), strings.Join(act, "\n"), 0, m.focus == 0) + "\n")
+	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), 0, m.focus == 1) + "\n")
 
 	if m.showLog {
 		lb.WriteString(bold.Render("log ") + dim.Render(m.logName) + "\n")
@@ -691,18 +789,29 @@ func (m model) View() string {
 			total = h
 		}
 		feedH := total - 3
+		badge := "▼ follow"
 		body := strings.Join(s.feed, "\n")
 		if body == "" {
 			body = dim.Render(" quiet — waiting for events")
 		} else {
-			// wrap (ANSI-aware), then keep the newest lines that fit
+			// wrap (ANSI-aware), then show the window liveOff above the tail
 			wl := strings.Split(lipgloss.NewStyle().Width(liveW-4).Render(body), "\n")
-			if len(wl) > feedH {
-				wl = wl[len(wl)-feedH:]
+			off := m.liveOff
+			if off > len(wl)-feedH {
+				off = max(0, len(wl)-feedH)
+			}
+			if off > 0 {
+				badge = "‖ paused"
+			}
+			end := len(wl) - off
+			if end > feedH {
+				wl = wl[end-feedH : end]
+			} else if len(wl) > end {
+				wl = wl[:end]
 			}
 			body = strings.Join(wl, "\n")
 		}
-		liveBox := titledBox(liveW, "LIVE", "▼ follow", body, total-2)
+		liveBox := titledBox(liveW, "LIVE", badge, body, total-2, m.focus == 2)
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, liveBox) + "\n")
 	} else {
 		b.WriteString(lb.String())
@@ -725,7 +834,7 @@ func (m model) View() string {
 
 	key := func(k, label string) string { return amber.Render(k) + dim.Render(" "+label) }
 	sep := dim.Render(" · ")
-	b.WriteString(" " + key("↑↓", "move") + sep + key("enter", "details") + sep +
+	b.WriteString(" " + key("tab", "focus") + sep + key("↑↓", "move") + sep + key("enter", "details") + sep +
 		key("o", "open") + sep + key("a", "approve") + sep + key("?", "help") + sep + key("q", "quit"))
 	return b.String()
 }
@@ -735,6 +844,7 @@ func (m model) helpView() string {
 		{"↑↓ / j k", "move selection"},
 		{"enter / e", "details: phase timeline (runs) / MR info + clashes (MRs)"},
 		{"o", "open the selected MR/PR in the browser"},
+		{"tab", "cycle focus: ACTIVE → HISTORY → LIVE (j/k scrolls the log)"},
 		{"l", "toggle AI/fixer log panel for the selected MR"},
 		{"a", "approve the selected PLANNED plan (semi-auto branches)"},
 		{"r", "force a watcher tick now"},
