@@ -81,7 +81,19 @@ consider() {
   if [ "$SKIP_DRAFTS" = "1" ] && [ "$draft" = "true" ]; then return 0; fi
 
   local ex
+  # shellcheck disable=SC2153  # EXCLUDE_BRANCHES comes from config.env
   for ex in $EXCLUDE_BRANCHES; do [ "$src" = "$ex" ] && return 0; done
+
+  # allowlist: when INCLUDE_BRANCHES is set, only matching source branches
+  # are handled at all (globs, space-separated); empty = every branch
+  if [ -n "${INCLUDE_BRANCHES:-}" ]; then
+    local inc ok=0
+    for inc in $INCLUDE_BRANCHES; do
+      # shellcheck disable=SC2254
+      case "$src" in $inc) ok=1;; esac
+    done
+    [ "$ok" = "1" ] || return 0
+  fi
 
   # routing: AUTO_BRANCHES sources are fixed fully automatically; everything
   # else runs the semi-auto plan -> human approve -> fix flow
