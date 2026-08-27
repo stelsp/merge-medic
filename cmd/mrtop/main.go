@@ -349,82 +349,11 @@ func (m model) renderTimeline(it item) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// 5x5 bitmap font → half-block pixel art (▀▄█), 3 text rows per line.
-var pixelFont = map[rune][5]string{
-	'M': {"X...X", "XX.XX", "X.X.X", "X...X", "X...X"},
-	'E': {"XXXXX", "X....", "XXXX.", "X....", "XXXXX"},
-	'R': {"XXXX.", "X...X", "XXXX.", "X..X.", "X...X"},
-	'G': {".XXXX", "X....", "X..XX", "X...X", ".XXXX"},
-	'D': {"XXXX.", "X...X", "X...X", "X...X", "XXXX."},
-	'I': {"XXXXX", "..X..", "..X..", "..X..", "XXXXX"},
-	'C': {".XXXX", "X....", "X....", "X....", ".XXXX"},
-	'-': {".....", ".....", "XXXXX", ".....", "....."},
-}
-
-// pixelRows rasterizes text into 3 rows of half-block pixels.
-func pixelRows(text string) []string {
-	rows := make([]string, 3)
-	for r := 0; r < 3; r++ {
-		var b strings.Builder
-		for _, ch := range text {
-			g, ok := pixelFont[ch]
-			if !ok {
-				b.WriteString(" ")
-				continue
-			}
-			top, bot := g[r*2], ""
-			if r*2+1 < 5 {
-				bot = g[r*2+1]
-			} else {
-				bot = "....."
-			}
-			for c := 0; c < 5; c++ {
-				t := top[c] == 'X'
-				d := bot[c] == 'X'
-				switch {
-				case t && d:
-					b.WriteString("█")
-				case t:
-					b.WriteString("▀")
-				case d:
-					b.WriteString("▄")
-				default:
-					b.WriteString(" ")
-				}
-			}
-			b.WriteString(" ")
-		}
-		rows[r] = b.String()
-	}
-	return rows
-}
-
-var banner = pixelRows("MERGE-MEDIC")
-
-var wavePalette = []lipgloss.Style{
-	lipgloss.NewStyle().Foreground(lipgloss.Color("22")),
-	lipgloss.NewStyle().Foreground(lipgloss.Color("28")),
-	lipgloss.NewStyle().Foreground(lipgloss.Color("34")),
-	lipgloss.NewStyle().Foreground(lipgloss.Color("40")),
-	lipgloss.NewStyle().Foreground(lipgloss.Color("46")),
-	lipgloss.NewStyle().Foreground(lipgloss.Color("40")),
-	lipgloss.NewStyle().Foreground(lipgloss.Color("34")),
-	lipgloss.NewStyle().Foreground(lipgloss.Color("28")),
-}
-
 var orbit = []rune("◐◓◑◒")
 
 func (m model) renderBanner() string {
-	var b strings.Builder
-	for _, line := range banner {
-		col := 0
-		for _, r := range line {
-			b.WriteString(wavePalette[(col+m.frame)%len(wavePalette)].Render(string(r)))
-			col++
-		}
-		b.WriteString("\n")
-	}
-	return b.String()
+	return " ▄█▄\n" +
+		" ▀█▀  " + bold.Render("merge-medic") + "\n"
 }
 
 func (m model) View() string {
@@ -438,13 +367,13 @@ func (m model) View() string {
 	}
 
 	var b strings.Builder
-	if m.width >= 70 && m.height >= 22 {
+	if m.height >= 14 {
 		b.WriteString(m.renderBanner())
 	}
 
 	// ── STATUS / METRICS boxes ────────────────────────────────────────────────
 	statusLines := []string{
-		fmt.Sprintf("%s %s · daemon %s", green.Render(string(orbit[m.frame%len(orbit)])),
+		fmt.Sprintf("%s %s · daemon %s", dim.Render(string(orbit[m.frame%len(orbit)])),
 			time.Now().Format("15:04:05"), d),
 		fmt.Sprintf("today %s %s %s · total %s %s %s",
 			green.Render(fmt.Sprintf("%d✓", s.ok)), red.Render(fmt.Sprintf("%d✗", s.bad)), yellow.Render(fmt.Sprintf("%d⚑", s.esc)),
