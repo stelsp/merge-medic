@@ -88,6 +88,8 @@ type snapshot struct {
 	ok, bad, esc         int
 	tok, tbad, tesc      int
 	tclean, tai          int
+	feed                 []string // pre-rendered live feed lines, oldest first
+	daily                []int    // DONE per day, last 14 days, oldest first
 }
 
 type tickMsg time.Time
@@ -112,7 +114,7 @@ func main() {
 	}
 	m := model{root: os.Args[1], width: 100, height: 40, expanded: map[string]bool{}}
 	if len(os.Args) > 2 && os.Args[2] == "--once" {
-		m.snap = readSnapshot(m.root)
+		m.snap = readSnapshot(m.root, m.width)
 		fmt.Println(m.View())
 		return
 	}
@@ -145,7 +147,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case tickMsg:
-		m.snap = readSnapshot(m.root)
+		m.snap = readSnapshot(m.root, m.width)
 		if n := len(m.rows()); m.sel >= n {
 			m.sel = max(0, n-1)
 		}
@@ -333,6 +335,40 @@ func (m model) renderTimeline(it item) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// banner is a compact figlet-style logo; renderBanner runs a green color
+// wave across it (the rice).
+var banner = []string{
+	"┌┬┐┌─┐┬─┐┌─┐┌─┐  ┌┬┐┌─┐┌┬┐┬┌─┐",
+	"│││├┤ ├┬┘│ ┬├┤───│││├┤  │││││",
+	"┴ ┴└─┘┴└─└─┘└─┘  ┴ ┴└─┘─┴┘┴└─┘",
+}
+
+var wavePalette = []lipgloss.Style{
+	lipgloss.NewStyle().Foreground(lipgloss.Color("22")),
+	lipgloss.NewStyle().Foreground(lipgloss.Color("28")),
+	lipgloss.NewStyle().Foreground(lipgloss.Color("34")),
+	lipgloss.NewStyle().Foreground(lipgloss.Color("40")),
+	lipgloss.NewStyle().Foreground(lipgloss.Color("46")),
+	lipgloss.NewStyle().Foreground(lipgloss.Color("40")),
+	lipgloss.NewStyle().Foreground(lipgloss.Color("34")),
+	lipgloss.NewStyle().Foreground(lipgloss.Color("28")),
+}
+
+var orbit = []rune("◐◓◑◒")
+
+func (m model) renderBanner() string {
+	var b strings.Builder
+	for _, line := range banner {
+		col := 0
+		for _, r := range line {
+			b.WriteString(wavePalette[(col+m.frame)%len(wavePalette)].Render(string(r)))
+			col++
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 func (m model) View() string {
 	var b strings.Builder
 	s := m.snap
@@ -342,12 +378,21 @@ func (m model) View() string {
 	if s.daemon {
 		d = green.Render("on")
 	}
-	b.WriteString(bold.Render("merge-medic") + dim.Render(" — live  ") + time.Now().Format("15:04:05") + "\n")
-	b.WriteString(fmt.Sprintf("daemon %s · AI budget %s/%s · today %s %s %s · total %s %s %s (%d clean, %d AI)\n",
-		d, s.budget, s.budgetMax,
+	if m.width >= 64 && m.height >= 20 {
+		b.WriteString(m.renderBanner())
+	} else {
+		b.WriteString(bold.Render("merge-medic") + "\n")
+	}
+	b.WriteString(fmt.Sprintf("%s %s · daemon %s · today %s %s %s · total %s %s %s (%d clean, %d AI)\n",
+		green.Render(string(orbit[m.frame%len(orbit)])), time.Now().Format("15:04:05"), d,
 		green.Render(fmt.Sprintf("%d✓", s.ok)), red.Render(fmt.Sprintf("%d✗", s.bad)), yellow.Render(fmt.Sprintf("%d⚑", s.esc)),
 		green.Render(fmt.Sprintf("%d✓", s.tok)), red.Render(fmt.Sprintf("%d✗", s.tbad)), yellow.Render(fmt.Sprintf("%d⚑", s.tesc)),
 		s.tclean, s.tai))
+	bmax, _ := strconv.Atoi(s.budgetMax)
+	bcur, _ := strconv.Atoi(s.budget)
+	b.WriteString(fmt.Sprintf("%s %s %s/%s · %s %s 14d\n",
+		dim.Render("ai-budget"), yellow.Render(gauge(bcur, bmax, 10)), s.budget, s.budgetMax,
+		dim.Render("activity"), green.Render(sparkline(s.daily))))
 
 	idx := 0
 	var act []string
@@ -392,8 +437,144 @@ func (m model) View() string {
 		}
 	}
 
+	// LIVE feed fills whatever height is left (the in-window `mrwatch live`)
+	used := lipgloss.Height(b.String())
+	feedH := m.height - used - 4 // border(2) + title + help line
+	if feedH >= 3 {
+		lines := s.feed
+		if len(lines) > feedH {
+			lines = lines[len(lines)-feedH:]
+		}
+		body := strings.Join(lines, "\n")
+		if body == "" {
+			body = dim.Render(" quiet — waiting for events")
+		}
+		b.WriteString(section.Width(m.width - 2).Render(
+			sectionTitle.Render("LIVE") + "\n" + body) + "\n")
+	}
+
 	b.WriteString(dim.Render("↑↓ select · enter timeline · l log · a approve · r tick · p pause · q quit"))
 	return b.String()
+}
+
+// tailBytes reads at most max bytes from the end of a file, split into lines.
+func tailBytes(path string, max int64) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	off := int64(0)
+	if st.Size() > max {
+		off = st.Size() - max
+	}
+	buf := make([]byte, st.Size()-off)
+	if _, err := f.ReadAt(buf, off); err != nil && len(buf) == 0 {
+		return nil
+	}
+	lines := nonEmpty(strings.Split(string(buf), "\n"))
+	if off > 0 && len(lines) > 0 {
+		lines = lines[1:] // first line likely cut mid-way
+	}
+	return lines
+}
+
+type feedLine struct {
+	ts   int64
+	text string
+}
+
+// buildFeed merges watcher lines and fixer phase events into one colored,
+// chronological stream (the in-window equivalent of `mrwatch live`).
+func buildFeed(root string, width int) []string {
+	var fl []feedLine
+	for _, ln := range tailBytes(filepath.Join(root, "logs", "watch.log"), 32*1024) {
+		if len(ln) < 21 {
+			continue
+		}
+		t, err := time.ParseInLocation("2006-01-02 15:04:05", ln[:19], time.Local)
+		if err != nil {
+			continue
+		}
+		msg := strings.TrimRight(ln[21:], " ")
+		style := dim
+		switch {
+		case strings.Contains(msg, "ERROR"):
+			style = red
+		case strings.Contains(msg, "CONFLICT"):
+			style = yellow
+		case strings.Contains(msg, "fixer ->"):
+			style = green
+		}
+		fl = append(fl, feedLine{t.Unix(),
+			dim.Render(ln[11:19]) + " " + style.Render(trunc(msg, width-12))})
+	}
+	for _, ln := range tailBytes(filepath.Join(root, "logs", "events.log"), 32*1024) {
+		parts := strings.SplitN(ln, "|", 4)
+		if len(parts) < 3 {
+			continue
+		}
+		ts, _ := strconv.ParseInt(parts[0], 10, 64)
+		phase := parts[2]
+		detail := ""
+		if len(parts) > 3 {
+			detail = parts[3]
+		}
+		style := lipgloss.NewStyle()
+		switch phase {
+		case "DONE":
+			style = green
+		case "FAIL":
+			style = red
+		case "AI_RESOLVE", "PLAN", "PLANNED", "ESCALATED":
+			style = yellow
+		}
+		fl = append(fl, feedLine{ts,
+			dim.Render(time.Unix(ts, 0).Format("15:04:05")) + " " +
+				bold.Render("!"+parts[1]) + " " + style.Render(fmt.Sprintf("%-11s", phase)) +
+				" " + dim.Render(trunc(detail, width-30))})
+	}
+	sort.SliceStable(fl, func(i, j int) bool { return fl[i].ts < fl[j].ts })
+	out := make([]string, 0, len(fl))
+	for _, l := range fl {
+		out = append(out, l.text)
+	}
+	if len(out) > 300 {
+		out = out[len(out)-300:]
+	}
+	return out
+}
+
+var sparkChars = []rune("▁▂▃▄▅▆▇█")
+
+func sparkline(vals []int) string {
+	maxV := 1
+	for _, v := range vals {
+		if v > maxV {
+			maxV = v
+		}
+	}
+	var b strings.Builder
+	for _, v := range vals {
+		idx := v * (len(sparkChars) - 1) / maxV
+		b.WriteRune(sparkChars[idx])
+	}
+	return b.String()
+}
+
+func gauge(cur, maxV, width int) string {
+	if maxV <= 0 {
+		maxV = 1
+	}
+	filled := cur * width / maxV
+	if filled > width {
+		filled = width
+	}
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 }
 
 func phasePct(phase string, inPhase int) int {
@@ -424,7 +605,7 @@ func trunc(s string, n int) string {
 	return s
 }
 
-func readSnapshot(root string) snapshot {
+func readSnapshot(root string, width int) snapshot {
 	var s snapshot
 	now := time.Now()
 	day0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Unix()
@@ -471,7 +652,7 @@ func readSnapshot(root string) snapshot {
 	// full run history from the durable ledger, newest first
 	if data, err := os.ReadFile(filepath.Join(root, "state", "history.log")); err == nil {
 		lines := nonEmpty(strings.Split(string(data), "\n"))
-		for i := len(lines) - 1; i >= 0 && len(s.histRows) < 30; i-- {
+		for i := len(lines) - 1; i >= 0 && len(s.histRows) < 8; i-- {
 			parts := strings.Split(lines[i], "|")
 			if len(parts) < 3 {
 				continue
@@ -525,6 +706,24 @@ func readSnapshot(root string) snapshot {
 				if ts >= day0 {
 					s.esc++
 				}
+			}
+		}
+	}
+
+	s.feed = buildFeed(root, width)
+
+	// DONE per day for the last 14 days (activity sparkline)
+	s.daily = make([]int, 14)
+	if data, err := os.ReadFile(filepath.Join(root, "state", "history.log")); err == nil {
+		for _, ln := range nonEmpty(strings.Split(string(data), "\n")) {
+			parts := strings.Split(ln, "|")
+			if len(parts) < 3 || parts[2] != "DONE" {
+				continue
+			}
+			ts, _ := strconv.ParseInt(parts[0], 10, 64)
+			age := int((day0 + 86400 - ts) / 86400) // 0 = today
+			if age >= 0 && age < 14 {
+				s.daily[13-age]++
 			}
 		}
 	}
