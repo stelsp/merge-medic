@@ -8,6 +8,9 @@
 #   mrwatch run         run a watcher tick right now
 #   mrwatch pause       unload the scheduler job (until resume)
 #   mrwatch resume      load the scheduler job back
+#
+# shellcheck disable=SC2012  # log names are machine-generated (ai-<iid>-<ts>.log);
+# `ls -t | head -1` is the portable newest-first pick, find has no mtime sort
 set -euo pipefail
 
 SELF="${BASH_SOURCE[0]}"

@@ -13,10 +13,10 @@ jobs:
       - name: shellcheck
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
-          shellcheck -S warning watch.sh fix-mr.sh lib.sh bin/mrwatch install.sh uninstall.sh
+          shellcheck watch.sh fix-mr.sh lib.sh bin/mrwatch install.sh uninstall.sh get.sh docs/demo-state.sh
       - name: bash -n
         run: |
-          for f in watch.sh fix-mr.sh lib.sh bin/mrwatch install.sh uninstall.sh; do
+          for f in watch.sh fix-mr.sh lib.sh bin/mrwatch install.sh uninstall.sh get.sh docs/demo-state.sh; do
             bash -n "$f"
           done
 
@@ -27,7 +27,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: build + vet
+      - name: gofmt
+        run: |
+          test -z "$(gofmt -l cmd/)" || { gofmt -l cmd/; exit 1; }
+      - name: build + vet + test
         run: |
           make build
           go vet ./...
+          go test ./...
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
