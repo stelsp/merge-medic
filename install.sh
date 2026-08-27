@@ -7,6 +7,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 INTERVAL="${MERGE_MEDIC_INTERVAL:-180}"   # seconds between watcher ticks
 OS="$(uname -s)"
+# Instance name = install dir basename (multiple clones watch multiple repos,
+# each with its own scheduler job). ~/.merge-medic keeps the historic names.
+INST="$(basename "$ROOT")"; INST="${INST#.}"
 
 echo "merge-medic installer"
 echo "  root: $ROOT  os: $OS"
@@ -62,16 +65,24 @@ else
 fi
 
 # ── mrwatch on PATH ───────────────────────────────────────────────────────────
+# The default instance owns plain `mrwatch`; extra instances get a suffixed
+# command (e.g. ~/.merge-medic-gh -> `mrwatch-gh`) so they can coexist.
+MRW="mrwatch"
+if [ "$INST" != "merge-medic" ]; then
+  SUF="${INST#merge-medic}"; SUF="${SUF#-}"
+  MRW="mrwatch-${SUF:-$INST}"
+fi
 mkdir -p "$HOME/.local/bin"
-ln -sf "$ROOT/bin/mrwatch" "$HOME/.local/bin/mrwatch"
+ln -sf "$ROOT/bin/mrwatch" "$HOME/.local/bin/$MRW"
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) echo "  NOTE: add ~/.local/bin to your PATH" ;;
 esac
+echo "  CLI: $MRW (status/top/live/...)"
 
 # ── scheduler ─────────────────────────────────────────────────────────────────
 if [ "$OS" = "Darwin" ]; then
-  LABEL="com.merge-medic.watch"
+  LABEL="com.$INST.watch"
   PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
   cat > "$PLIST" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
@@ -112,7 +123,7 @@ elif [ "$OS" = "Linux" ]; then
   fi
   UNITDIR="$HOME/.config/systemd/user"
   mkdir -p "$UNITDIR"
-  cat > "$UNITDIR/merge-medic.service" <<UNIT
+  cat > "$UNITDIR/$INST.service" <<UNIT
 [Unit]
 Description=merge-medic MR conflict watcher tick
 
@@ -122,7 +133,7 @@ ExecStart=/bin/bash $ROOT/watch.sh
 # fixers are launched detached by watch.sh and must outlive the tick
 KillMode=process
 UNIT
-  cat > "$UNITDIR/merge-medic.timer" <<UNIT
+  cat > "$UNITDIR/$INST.timer" <<UNIT
 [Unit]
 Description=merge-medic watcher schedule
 
@@ -134,8 +145,8 @@ OnUnitActiveSec=${INTERVAL}s
 WantedBy=timers.target
 UNIT
   systemctl --user daemon-reload
-  systemctl --user enable --now merge-medic.timer
-  echo "  systemd user timer enabled (merge-medic.timer, every ${INTERVAL}s)"
+  systemctl --user enable --now "$INST.timer"
+  echo "  systemd user timer enabled ($INST.timer, every ${INTERVAL}s)"
 else
   echo "  WARN: unsupported OS '$OS' — run watch.sh from your own scheduler"
 fi
