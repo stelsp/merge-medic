@@ -187,6 +187,7 @@ Everything lives in `config.env` (gitignored; seeded from
 | `POST_RESOLUTION_NOTE` | `1` = comment the resolver's reasoning on the MR/PR |
 | `QUIET_MINUTES` | defer the fix while the source branch had a push this recently (retried every tick; `0` disables) |
 | `USER_REPOS` | local checkouts to inspect — uncommitted work on the branch there also defers the fix |
+| `INCLUDE_BRANCHES` | allowlist of source-branch globs — when set, everything else is ignored entirely |
 | `EXCLUDE_BRANCHES` | branches to ignore (your active work) |
 | `DAILY_AGENT_RUNS` | daily cap on AI invocations |
 | `PARALLEL_FIXERS` | concurrent fixers (`1` = sequential) |
