@@ -37,7 +37,7 @@ var (
 	amber   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	amberB  = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
 	borderC = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	selRow  = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	selRow  = lipgloss.NewStyle().Background(lipgloss.Color("58"))
 	// body of a panel: sharp border, no top edge — the top line is drawn by
 	// titledBox with the title embedded in the border itself
 	section = lipgloss.NewStyle().
@@ -176,6 +176,8 @@ type model struct {
 	selF     int // fleet cursor
 	lastFeed string // newest feed line, for the typewriter effect
 	typeK    int    // typed width of the newest feed line
+	pickKind string // "" = no modal; "model" | "deliver"
+	pickSel  int
 }
 
 func main() {
@@ -313,6 +315,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.frame++
 		return m, tick()
 	case tea.KeyMsg:
+		if m.pickKind != "" {
+			opts := m.pickOptions()
+			switch msg.String() {
+			case "esc", "q":
+				m.pickKind = ""
+			case "up", "k":
+				if m.pickSel > 0 {
+					m.pickSel--
+				}
+			case "down", "j":
+				if m.pickSel < len(opts)-1 {
+					m.pickSel++
+				}
+			case "enter":
+				choice := opts[m.pickSel]
+				switch m.pickKind {
+				case "model":
+					setConfigVal(m.root, "CLAUDE_MODEL", "\""+choice+"\"")
+					m.snap.model = choice
+				case "deliver":
+					setConfigVal(m.root, "PUSH_MODE", "\""+choice+"\"")
+					m.snap.pushMode = choice
+				}
+				m.pickKind = ""
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -349,7 +378,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selH--
 				}
 			case 3:
-				m.liveOff += 3
+				m.liveOff++
 			}
 		case "down", "j":
 			if m.screen == 2 {
@@ -368,7 +397,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selH++
 				}
 			case 3:
-				m.liveOff = max(0, m.liveOff-3)
+				m.liveOff = max(0, m.liveOff-1)
 			}
 		case "enter", "e":
 			if m.screen == 2 {
@@ -433,22 +462,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focus != 0 || m.snap.resolver != "claude" {
 				break
 			}
-			next := map[string]string{"opus": "sonnet", "sonnet": "haiku", "haiku": "opus"}[m.snap.model]
-			if next == "" {
-				next = "opus"
+			m.pickKind, m.pickSel = "model", 0
+			for i, o := range m.pickOptions() {
+				if o == m.snap.model {
+					m.pickSel = i
+				}
 			}
-			setConfigVal(m.root, "CLAUDE_MODEL", "\""+next+"\"")
-			m.snap.model = next
 		case "m":
 			if m.focus != 0 {
 				break
 			}
-			mode := "mr"
-			if m.snap.pushMode == "mr" {
-				mode = "direct"
+			m.pickKind, m.pickSel = "deliver", 0
+			for i, o := range m.pickOptions() {
+				if o == m.snap.pushMode {
+					m.pickSel = i
+				}
 			}
-			setConfigVal(m.root, "PUSH_MODE", "\""+mode+"\"")
-			m.snap.pushMode = mode
 		case "r":
 			c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
 			_ = c.Start()
@@ -510,6 +539,25 @@ func segBar(ph string, frame int) string {
 		}
 	}
 	return b.String()
+}
+
+// pickOptions returns the choices for the active modal picker.
+func (m model) pickOptions() []string {
+	switch m.pickKind {
+	case "model":
+		return []string{"opus", "sonnet", "haiku"}
+	case "deliver":
+		return []string{"direct", "mr"}
+	}
+	return nil
+}
+
+// selMark highlights the selected row: amber left bar + warm background.
+func selMark(row string) string {
+	if strings.HasPrefix(row, " ") {
+		row = row[1:]
+	}
+	return amberB.Render("▎") + selRow.Render(row)
 }
 
 func outcomeMark(phase string) string {
@@ -577,7 +625,7 @@ func (m model) renderRow(it item, idx int, now int64, aw int) string {
 		style.Render(fmt.Sprintf("%-10s", it.phase)), el/60, el%60,
 		dim.Render(tag), dim.Render(trunc(detail, aw-48)))
 	if idx == m.sel && m.focus == 1 {
-		row = selRow.Render(row)
+		row = selMark(row)
 	}
 	if m.expanded[it.key()] {
 		row += "\n" + m.renderTimeline(it)
@@ -616,7 +664,7 @@ func (m model) renderHistRow(it item, idx int, aw int) string {
 		style.Render(fmt.Sprintf("%-10s", it.phase)), dur,
 		dim.Render(tag), dim.Render(trunc(detail, aw-48)))
 	if idx == m.selH && m.focus == 2 {
-		row = selRow.Render(row)
+		row = selMark(row)
 	}
 	if m.expanded[it.key()] {
 		row += "\n" + m.renderTimeline(it)
@@ -718,6 +766,9 @@ func (m model) renderBanner() string {
 func (m model) View() string {
 	if m.showHelp {
 		return m.helpView()
+	}
+	if m.pickKind != "" {
+		return m.pickerView()
 	}
 	if m.screen == 1 {
 		return m.insightsView()
@@ -912,7 +963,7 @@ func (m model) View() string {
 				dim.Render(fmt.Sprintf("%-8s", trunc(mr.author, 8))),
 				titleStyled(title, tstyle, aw-(31+bcol)))
 			if idx == m.sel && m.focus == 1 {
-				row = selRow.Render(row)
+				row = selMark(row)
 			}
 			if m.expandedMR[mr.iid] {
 				row += "\n" + dim.Render(trunc(fmt.Sprintf("      %s → %s · by %s · updated %s ago · CI %s",
@@ -1017,17 +1068,19 @@ func (m model) View() string {
 			// wrap (ANSI-aware), then show the window liveOff above the tail
 			wl := strings.Split(lipgloss.NewStyle().Width(liveW-4).Render(body), "\n")
 			off := m.liveOff
-			if off > len(wl)-feedH {
-				off = max(0, len(wl)-feedH)
+			if off > len(wl)-1 {
+				off = max(0, len(wl)-1)
 			}
 			if off > 0 {
 				badge = "‖ paused"
 			}
 			end := len(wl) - off
-			if end > feedH {
-				wl = wl[end-feedH : end]
-			} else if len(wl) > end {
-				wl = wl[:end]
+			start := max(0, end-feedH)
+			wl = wl[start:end]
+			// with LIVE focused, the cursor line sits at the bottom of the
+			// window and j/k walk it line by line
+			if m.focus == 3 && len(wl) > 0 {
+				wl[len(wl)-1] = selMark(wl[len(wl)-1])
 			}
 			body = strings.Join(wl, "\n")
 		}
@@ -1187,13 +1240,51 @@ func (m model) fleetView() string {
 			bold.Render(fmt.Sprintf("%-16s", name)), dim.Render(fmt.Sprintf("%-7s", pv)),
 			trunc(pp, 40), d, spent, st)
 		if i == m.selF {
-			row = selRow.Render(row)
+			row = selMark(row)
 		}
 		rows = append(rows, row)
 	}
 	b.WriteString(titledBox(m.width, "FLEET", fmt.Sprintf("%d instances", len(insts)), strings.Join(rows, "\n"), 0, true) + "\n")
 	b.WriteString(" " + amber.Render("↑↓") + dim.Render(" move · ") + amber.Render("enter") + dim.Render(" switch dashboard to instance · ") + amber.Render("1") + dim.Render(" main · ") + amber.Render("2") + dim.Render(" insights · ") + amber.Render("q") + dim.Render(" quit"))
 	return b.String()
+}
+
+// pickerView renders the centered modal select.
+func (m model) pickerView() string {
+	title := "MODEL"
+	desc := "resolver model for the next fixes"
+	cur := m.snap.model
+	if m.pickKind == "deliver" {
+		title = "DELIVERY"
+		desc = "how fixes reach the branch"
+		cur = m.snap.pushMode
+	}
+	labels := map[string]string{
+		"opus":   "best quality, priciest",
+		"sonnet": "strong + ~5× cheaper",
+		"haiku":  "fastest, cheapest",
+		"direct": "push straight into the source branch",
+		"mr":     "open a resolution MR — branch untouched",
+	}
+	var rows []string
+	for i, o := range m.pickOptions() {
+		mark := "  "
+		if o == cur {
+			mark = green.Render("● ")
+		}
+		row := fmt.Sprintf(" %s%-8s %s", mark, o, dim.Render(labels[o]))
+		if i == m.pickSel {
+			row = selMark(row)
+		}
+		rows = append(rows, row)
+	}
+	rows = append(rows, "", dim.Render(" ↑↓ choose · enter apply · esc cancel"))
+	boxW := 56
+	if boxW > m.width-4 {
+		boxW = m.width - 4
+	}
+	modal := titledBox(boxW, title, desc, strings.Join(rows, "\n"), 0, true)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
 
 func (m model) helpView() string {
@@ -1203,8 +1294,8 @@ func (m model) helpView() string {
 		{"o", "open the selected MR/PR in the browser"},
 		{"tab", "cycle focus: ACTIVE → HISTORY → LIVE (j/k scrolls the log)"},
 		{"+ / -", "raise / lower the daily AI budget when STATUS is focused (0 = unlimited)"},
-		{"m", "toggle delivery when STATUS is focused: direct push ↔ resolution MR"},
-		{"M", "cycle the Claude model when STATUS is focused: opus → sonnet → haiku"},
+		{"m", "delivery select (STATUS focused): direct push / resolution MR"},
+		{"M", "model select (STATUS focused): opus / sonnet / haiku"},
 		{"1 / 2 / 3", "screens: main dashboard / insights (hotspots, spend) / fleet (instances)"},
 		{"l", "toggle AI/fixer log panel for the selected MR"},
 		{"a", "approve the selected PLANNED plan (semi-auto branches)"},
