@@ -1562,14 +1562,15 @@ func (m model) insightsView() string {
 		// keep only the boxed part of a sub-view (no banner, no footer)
 		lines := strings.Split(v, "\n")
 		start, end := 0, len(lines)
+		// border lines start with the border-color ANSI code, not the glyph
 		for i, ln := range lines {
-			if strings.HasPrefix(ln, "┌") {
+			if strings.Contains(ln, "┌─") {
 				start = i
 				break
 			}
 		}
 		for i := len(lines) - 1; i >= 0; i-- {
-			if strings.HasPrefix(lines[i], "└") {
+			if strings.Contains(lines[i], "└─") {
 				end = i + 1
 				break
 			}
