@@ -359,11 +359,8 @@ func (m model) renderTimeline(it item) string {
 var orbit = []rune("◐◓◑◒")
 
 func (m model) renderBanner() string {
-	return "    ═\n" +
-		" ═   ═\n" +
-		"\n" +
-		" ═══\n" +
-		"    ═  " + bold.Render("merge-medic") + "\n"
+	return " ▄█▄\n" +
+		" ▀█▀  " + bold.Render("merge-medic") + "\n"
 }
 
 func (m model) View() string {
