@@ -116,6 +116,9 @@ func main() {
 	}
 	m := model{root: os.Args[1], width: 100, height: 40, expanded: map[string]bool{}}
 	if len(os.Args) > 2 && os.Args[2] == "--once" {
+		if c, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && c > 40 {
+			m.width = c
+		}
 		m.snap = readSnapshot(m.root, m.width)
 		fmt.Println(m.View())
 		return
@@ -217,7 +220,7 @@ func outcomeMark(phase string) string {
 	return " "
 }
 
-func (m model) renderRow(it item, idx int, now int64) string {
+func (m model) renderRow(it item, idx int, now int64, aw int) string {
 	mark := outcomeMark(it.phase)
 	if it.active && !terminal(it.phase) {
 		mark = blue.Render(string(spinner[m.frame%len(spinner)]))
@@ -248,11 +251,15 @@ func (m model) renderRow(it item, idx int, now int64) string {
 	if tag == "" || tag == "none" {
 		tag = "  "
 	}
+	bw := 20
+	if aw < 90 {
+		bw = 12
+	}
 	row := fmt.Sprintf(" %s %s %s [%s] %3d%%  %s %3dm%02ds %-5s %s",
 		mark, bold.Render(fmt.Sprintf("!%-4s", it.iid)), dim.Render(when),
-		bar(pct, 20), pct,
+		bar(pct, bw), pct,
 		style.Render(fmt.Sprintf("%-10s", it.phase)), el/60, el%60,
-		dim.Render(tag), dim.Render(trunc(it.detail, m.width-62)))
+		dim.Render(tag), dim.Render(trunc(it.detail, aw-(48+bw))))
 	if idx == m.sel {
 		row = selRow.Render(row)
 	}
@@ -264,7 +271,7 @@ func (m model) renderRow(it item, idx int, now int64) string {
 
 // renderHistRow is a compact finished-run line: no progress bar (a static
 // 100% slab is just noise), outcome mark + phase + duration + mode + detail.
-func (m model) renderHistRow(it item, idx int) string {
+func (m model) renderHistRow(it item, idx int, aw int) string {
 	style := dim
 	switch it.phase {
 	case "DONE":
@@ -291,7 +298,7 @@ func (m model) renderHistRow(it item, idx int) string {
 		outcomeMark(it.phase), bold.Render(fmt.Sprintf("!%-4s", it.iid)),
 		dim.Render(time.Unix(it.t0, 0).Format("02.01 15:04")),
 		style.Render(fmt.Sprintf("%-10s", it.phase)), dur,
-		dim.Render(tag), dim.Render(trunc(detail, m.width-46)))
+		dim.Render(tag), dim.Render(trunc(detail, aw-46)))
 	if idx == m.sel {
 		row = selRow.Render(row)
 	}
@@ -337,13 +344,57 @@ func (m model) renderTimeline(it item) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// banner is a compact figlet-style logo; renderBanner runs a green color
-// wave across it (the rice).
-var banner = []string{
-	"┌┬┐┌─┐┬─┐┌─┐┌─┐  ┌┬┐┌─┐┌┬┐┬┌─┐",
-	"│││├┤ ├┬┘│ ┬├┤───│││├┤  │││││",
-	"┴ ┴└─┘┴└─└─┘└─┘  ┴ ┴└─┘─┴┘┴└─┘",
+// 5x5 bitmap font → half-block pixel art (▀▄█), 3 text rows per line.
+var pixelFont = map[rune][5]string{
+	'M': {"X...X", "XX.XX", "X.X.X", "X...X", "X...X"},
+	'E': {"XXXXX", "X....", "XXXX.", "X....", "XXXXX"},
+	'R': {"XXXX.", "X...X", "XXXX.", "X..X.", "X...X"},
+	'G': {".XXXX", "X....", "X..XX", "X...X", ".XXXX"},
+	'D': {"XXXX.", "X...X", "X...X", "X...X", "XXXX."},
+	'I': {"XXXXX", "..X..", "..X..", "..X..", "XXXXX"},
+	'C': {".XXXX", "X....", "X....", "X....", ".XXXX"},
+	'-': {".....", ".....", "XXXXX", ".....", "....."},
 }
+
+// pixelRows rasterizes text into 3 rows of half-block pixels.
+func pixelRows(text string) []string {
+	rows := make([]string, 3)
+	for r := 0; r < 3; r++ {
+		var b strings.Builder
+		for _, ch := range text {
+			g, ok := pixelFont[ch]
+			if !ok {
+				b.WriteString(" ")
+				continue
+			}
+			top, bot := g[r*2], ""
+			if r*2+1 < 5 {
+				bot = g[r*2+1]
+			} else {
+				bot = "....."
+			}
+			for c := 0; c < 5; c++ {
+				t := top[c] == 'X'
+				d := bot[c] == 'X'
+				switch {
+				case t && d:
+					b.WriteString("█")
+				case t:
+					b.WriteString("▀")
+				case d:
+					b.WriteString("▄")
+				default:
+					b.WriteString(" ")
+				}
+			}
+			b.WriteString(" ")
+		}
+		rows[r] = b.String()
+	}
+	return rows
+}
+
+var banner = pixelRows("MERGE-MEDIC")
 
 var wavePalette = []lipgloss.Style{
 	lipgloss.NewStyle().Foreground(lipgloss.Color("22")),
@@ -372,58 +423,30 @@ func (m model) renderBanner() string {
 }
 
 func (m model) View() string {
-	var b strings.Builder
 	s := m.snap
 	now := time.Now().Unix()
+	wide := m.width >= 110
 
 	d := red.Render("off")
 	if s.daemon {
 		d = green.Render("on")
 	}
-	if m.width >= 64 && m.height >= 20 {
+
+	var b strings.Builder
+	if m.width >= 70 && m.height >= 22 {
 		b.WriteString(m.renderBanner())
-	} else {
-		b.WriteString(bold.Render("merge-medic") + "\n")
-	}
-	b.WriteString(fmt.Sprintf("%s %s · daemon %s · today %s %s %s · total %s %s %s (%d clean, %d AI)\n",
-		green.Render(string(orbit[m.frame%len(orbit)])), time.Now().Format("15:04:05"), d,
-		green.Render(fmt.Sprintf("%d✓", s.ok)), red.Render(fmt.Sprintf("%d✗", s.bad)), yellow.Render(fmt.Sprintf("%d⚑", s.esc)),
-		green.Render(fmt.Sprintf("%d✓", s.tok)), red.Render(fmt.Sprintf("%d✗", s.tbad)), yellow.Render(fmt.Sprintf("%d⚑", s.tesc)),
-		s.tclean, s.tai))
-	bmax, _ := strconv.Atoi(s.budgetMax)
-	bcur, _ := strconv.Atoi(s.budget)
-	b.WriteString(fmt.Sprintf("%s %s %s/%s · %s %s 14d · %s ≈$%.2f today / $%.2f all\n",
-		dim.Render("ai-budget"), yellow.Render(gauge(bcur, bmax, 10)), s.budget, s.budgetMax,
-		dim.Render("activity"), green.Render(sparkline(s.daily)),
-		dim.Render("spend"), s.spendToday, s.spend))
-	if s.modelLine != "" {
-		b.WriteString(dim.Render("tokens "+s.modelLine) + "\n")
 	}
 
-	idx := 0
-	var act []string
-	if len(s.activeRows) == 0 {
-		act = append(act, dim.Render(" no active fixers — no new conflicts"))
+	// ── STATUS / METRICS boxes ────────────────────────────────────────────────
+	statusLines := []string{
+		fmt.Sprintf("%s %s · daemon %s", green.Render(string(orbit[m.frame%len(orbit)])),
+			time.Now().Format("15:04:05"), d),
+		fmt.Sprintf("today %s %s %s · total %s %s %s",
+			green.Render(fmt.Sprintf("%d✓", s.ok)), red.Render(fmt.Sprintf("%d✗", s.bad)), yellow.Render(fmt.Sprintf("%d⚑", s.esc)),
+			green.Render(fmt.Sprintf("%d✓", s.tok)), red.Render(fmt.Sprintf("%d✗", s.tbad)), yellow.Render(fmt.Sprintf("%d⚑", s.tesc))),
+		fmt.Sprintf("%d clean · %d AI resolved", s.tclean, s.tai),
 	}
-	for _, it := range s.activeRows {
-		act = append(act, m.renderRow(it, idx, now))
-		idx++
-	}
-	b.WriteString(section.Width(m.width - 2).Render(
-		sectionTitle.Render("ACTIVE") + "\n" + strings.Join(act, "\n")) + "\n")
-
-	var hist []string
-	if len(s.histRows) == 0 {
-		hist = append(hist, dim.Render(" no runs yet"))
-	}
-	for _, it := range s.histRows {
-		hist = append(hist, m.renderHistRow(it, idx))
-		idx++
-	}
-	b.WriteString(section.Width(m.width - 2).Render(
-		sectionTitle.Render("HISTORY") + "\n" + strings.Join(hist, "\n")) + "\n")
-
-	strip := " "
+	strip := ""
 	for _, mr := range s.mrs {
 		switch mr.status {
 		case "conflict":
@@ -434,7 +457,61 @@ func (m model) View() string {
 			strip += dim.Render("!"+mr.iid+"?") + " "
 		}
 	}
-	b.WriteString(bold.Render("MRs") + strip + "\n")
+	if strip != "" {
+		statusLines = append(statusLines, dim.Render("MRs ")+strip)
+	}
+
+	bmax, _ := strconv.Atoi(s.budgetMax)
+	bcur, _ := strconv.Atoi(s.budget)
+	metricLines := []string{
+		fmt.Sprintf("%s %s %s/%s", dim.Render("ai-budget"), yellow.Render(gauge(bcur, bmax, 12)), s.budget, s.budgetMax),
+		fmt.Sprintf("%s  %s 14d", dim.Render("activity"), green.Render(sparkline(s.daily))),
+		fmt.Sprintf("%s     ≈$%.2f today · $%.2f all", dim.Render("spend"), s.spendToday, s.spend),
+	}
+	if s.modelLine != "" {
+		metricLines = append(metricLines, dim.Render("tokens    "+s.modelLine))
+	}
+
+	if wide {
+		half := (m.width - 2) / 2
+		row := lipgloss.JoinHorizontal(lipgloss.Top,
+			section.Width(half).Render(sectionTitle.Render("STATUS")+"\n"+strings.Join(statusLines, "\n")),
+			section.Width(m.width-2-half).Render(sectionTitle.Render("METRICS")+"\n"+strings.Join(metricLines, "\n")))
+		b.WriteString(row + "\n")
+	} else {
+		b.WriteString(section.Width(m.width - 2).Render(sectionTitle.Render("STATUS") + "\n" +
+			strings.Join(append(statusLines, metricLines...), "\n")) + "\n")
+	}
+
+	// ── ACTIVE / HISTORY ──────────────────────────────────────────────────────
+	idx := 0
+	colw := m.width - 2
+	if wide {
+		colw = (m.width - 2) / 2
+	}
+	var act []string
+	if len(s.activeRows) == 0 {
+		act = append(act, dim.Render(" no active fixers"))
+	}
+	for _, it := range s.activeRows {
+		act = append(act, m.renderRow(it, idx, now, colw))
+		idx++
+	}
+	var hist []string
+	if len(s.histRows) == 0 {
+		hist = append(hist, dim.Render(" no runs yet"))
+	}
+	for _, it := range s.histRows {
+		hist = append(hist, m.renderHistRow(it, idx, colw))
+		idx++
+	}
+	actBox := section.Width(colw).Render(sectionTitle.Render("ACTIVE") + "\n" + strings.Join(act, "\n"))
+	histBox := section.Width(colw).Render(sectionTitle.Render("HISTORY") + "\n" + strings.Join(hist, "\n"))
+	if wide {
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, actBox, histBox) + "\n")
+	} else {
+		b.WriteString(actBox + "\n" + histBox + "\n")
+	}
 
 	if m.showLog {
 		b.WriteString(bold.Render("log ") + dim.Render(m.logName) + "\n")
@@ -443,9 +520,9 @@ func (m model) View() string {
 		}
 	}
 
-	// LIVE feed fills whatever height is left (the in-window `mrwatch live`)
+	// ── LIVE feed fills whatever height is left ───────────────────────────────
 	used := lipgloss.Height(b.String())
-	feedH := m.height - used - 4 // border(2) + title + help line
+	feedH := m.height - used - 4
 	if feedH >= 3 {
 		lines := s.feed
 		if len(lines) > feedH {
