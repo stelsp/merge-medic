@@ -78,11 +78,11 @@ consider() {
     notify "Conflict in $SIGIL$iid" "$src -> $tgt: $title"
   fi
 
-  if [ "$SKIP_DRAFTS" = "1" ] && [ "$draft" = "true" ]; then return 0; fi
+  if [ "${SKIP_DRAFTS:-1}" = "1" ] && [ "$draft" = "true" ]; then return 0; fi
 
   local ex
   # shellcheck disable=SC2153  # EXCLUDE_BRANCHES comes from config.env
-  for ex in $EXCLUDE_BRANCHES; do [ "$src" = "$ex" ] && return 0; done
+  for ex in ${EXCLUDE_BRANCHES:-}; do [ "$src" = "$ex" ] && return 0; done
 
   # allowlist: when INCLUDE_BRANCHES is set, only matching source branches
   # are handled at all (globs, space-separated); empty = every branch
@@ -193,9 +193,9 @@ if [ -z "$targets" ]; then
 fi
 
 count="$(printf '%s' "$targets" | grep -c . || true)"
-log "to fix: $count MR(s); AI budget spent today: $spent/$DAILY_AGENT_RUNS"
+log "to fix: $count MR(s); AI budget spent today: $spent/${DAILY_AGENT_RUNS:-6}"
 
-if [ "$spent" -ge "$DAILY_AGENT_RUNS" ]; then
+if [ "$spent" -ge "${DAILY_AGENT_RUNS:-6}" ]; then
   log "daily AI budget exhausted — skipping"; exit 0
 fi
 
@@ -206,7 +206,7 @@ while IFS=$'\t' read -r iid src tgt mode _; do
   [ -n "$iid" ] && log "  -> $SIGIL$iid  $src -> $tgt  [$mode]"
 done <<<"$targets"
 
-if [ "$DRY_RUN" = "1" ]; then
+if [ "${DRY_RUN:-1}" = "1" ]; then
   log "DRY_RUN=1 — not merging or pushing anything"
   while IFS=$'\t' read -r iid _ _ _; do
     [ -z "$iid" ] && continue
