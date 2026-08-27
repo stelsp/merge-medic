@@ -154,18 +154,36 @@ resolver_call() {
   return $rc
 }
 
+# mr_author prints the MR/PR author's username (the default trusted commenter).
+mr_author() {
+  if [ "${PROVIDER:-gitlab}" = "github" ]; then
+    gh pr view "$IID" --repo "$PROJECT_PATH" --json author --jq '.author.login' 2>/dev/null || true
+  else
+    ( cd "$WT" 2>/dev/null || cd "$WATCH_REPO"
+      GITLAB_HOST="${GITLAB_HOST:-}" glab api "projects/:fullpath/merge_requests/$IID" 2>/dev/null ) \
+      | jq -r '.author.username // empty' 2>/dev/null || true
+  fi
+}
+
 # Human MR/PR comments newer than the plan file — corrections for the
-# approved run. Bot-authored comments (merge-medic prefix) are skipped.
+# approved run. These comments become INSTRUCTIONS for an agent with push
+# rights, so only trusted authors are read: TRUSTED_AUTHORS from config, or
+# (when unset) just the MR author. Bot comments (merge-medic prefix) skipped.
 collect_feedback() { # $1 = plan file; its mtime is the cutoff
-  local cutoff
+  local cutoff trusted allowed_json
   cutoff="$(stat -f%m "$1" 2>/dev/null || stat -c%Y "$1" 2>/dev/null || echo 0)"
+  trusted="${TRUSTED_AUTHORS:-}"
+  [ -z "$trusted" ] && trusted="$(mr_author)"
+  [ -z "$trusted" ] && return 0   # cannot establish trust — read nobody
+  # shellcheck disable=SC2086
+  allowed_json="$(printf '%s\n' $trusted | jq -R . | jq -cs .)"
   if [ "${PROVIDER:-gitlab}" = "github" ]; then
     gh pr view "$IID" --repo "$PROJECT_PATH" --json comments 2>/dev/null \
-      | jq -r --argjson t "$cutoff" '[.comments[] | select(.body | test("^(## .? ?merge-medic|merge-medic)") | not) | select((.createdAt | fromdateiso8601) > $t) | "- " + .body] | join("\n")' 2>/dev/null || true
+      | jq -r --argjson t "$cutoff" --argjson ok "$allowed_json" '[.comments[] | select([.author.login] | inside($ok)) | select(.body | test("^(## .? ?merge-medic|merge-medic)") | not) | select((.createdAt | fromdateiso8601) > $t) | "- " + .body] | join("\n")' 2>/dev/null || true
   else
     ( cd "$WT" 2>/dev/null || cd "$WATCH_REPO"
       GITLAB_HOST="${GITLAB_HOST:-}" glab api "projects/:fullpath/merge_requests/$IID/notes?order_by=created_at&sort=desc&per_page=20" 2>/dev/null ) \
-      | jq -r --argjson t "$cutoff" '[.[] | select(.system==false) | select(.body | test("^(## .? ?merge-medic|merge-medic)") | not) | select((.created_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > $t) | "- " + .body] | reverse | join("\n")' 2>/dev/null || true
+      | jq -r --argjson t "$cutoff" --argjson ok "$allowed_json" '[.[] | select(.system==false) | select([.author.username] | inside($ok)) | select(.body | test("^(## .? ?merge-medic|merge-medic)") | not) | select((.created_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > $t) | "- " + .body] | reverse | join("\n")' 2>/dev/null || true
   fi
 }
 
