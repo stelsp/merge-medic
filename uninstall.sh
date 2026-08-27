@@ -22,4 +22,9 @@ if [ "$INST" != "merge-medic" ]; then
   MRW="mrwatch-${SUF:-$INST}"
 fi
 rm -f "$HOME/.local/bin/$MRW"
+REG="$HOME/.config/merge-medic/instances"
+if [ -f "$REG" ]; then
+  grep -vxF "$ROOT" "$REG" > "$REG.tmp" 2>/dev/null || true
+  mv "$REG.tmp" "$REG"
+fi
 echo "merge-medic scheduler removed. Directory left in place — delete it manually if you want."

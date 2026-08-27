@@ -550,7 +550,7 @@ func (m model) helpView() string {
 	for _, r := range rows {
 		b.WriteString(fmt.Sprintf("  %s  %s\n", bold.Render(fmt.Sprintf("%-9s", r[0])), r[1]))
 	}
-	b.WriteString("\n" + dim.Render("  CLI: mrwatch status · live · mrs · agent <iid> · run · pause/resume"))
+	b.WriteString("\n" + dim.Render("  CLI: mrwatch setup · log -f · agent <iid> · run · pause/resume"))
 	b.WriteString("\n\n" + dim.Render("  press ? or esc to return"))
 	return b.String()
 }
@@ -587,7 +587,7 @@ type feedLine struct {
 }
 
 // buildFeed merges watcher lines and fixer phase events into one colored,
-// chronological stream (the in-window equivalent of `mrwatch live`).
+// chronological stream shown in the LIVE panel.
 func buildFeed(root string, width int) []string {
 	var fl []feedLine
 	for _, ln := range tailBytes(filepath.Join(root, "logs", "watch.log"), 32*1024) {
