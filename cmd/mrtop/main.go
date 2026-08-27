@@ -163,7 +163,7 @@ type model struct {
 	root       string
 	snap       snapshot
 	sel        int // cursor within the focused panel
-	focus      int // 0 MRS · 1 HISTORY · 2 LIVE · 3 SETTINGS · 4 RUNS · 5 SPEND · 6 HOTSPOTS
+	focus      int // 0 MRS · 1 HISTORY · 2 LIVE · 3 SETTINGS · 4 RUNS · 5 SPEND
 	selH       int // HISTORY cursor (kept when switching focus)
 	liveOff    int // lines scrolled up from the tail of LIVE (0 = follow)
 	expanded   map[string]bool
@@ -376,7 +376,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "1":
 			m.screen = 0
 		case "2":
-			m.screen = 1
+			m.screen = 5
 		case "3":
 			m.screen = 2
 		case "esc":
@@ -390,7 +390,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.expanded = map[string]bool{}
 			m.expandedMR = map[string]bool{}
 		case "tab":
-			m.focus = (m.focus + 1) % 7
+			m.focus = (m.focus + 1) % 6
 		case "up", "k":
 			if m.screen == 2 {
 				if m.selF > 0 {
@@ -460,10 +460,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.screen == 0 && m.focus == 5 {
 				m.screen = 4
-				break
-			}
-			if m.screen == 0 && m.focus == 6 {
-				m.screen = 5
 				break
 			}
 			if m.screen == 2 {
@@ -816,9 +812,6 @@ func (m model) View() string {
 	if m.showHelp {
 		return m.helpView()
 	}
-	if m.screen == 1 {
-		return m.insightsView()
-	}
 	if m.screen == 2 {
 		return m.fleetView()
 	}
@@ -1096,10 +1089,6 @@ func (m model) View() string {
 		avail = m.height - 1
 	}
 	topH := 6
-	hsH := 0
-	if len(s.hotspots) > 0 && avail >= 26 {
-		hsH = 6
-	}
 	histH := 7
 	if avail < 24 {
 		histH = 5
@@ -1114,7 +1103,7 @@ func (m model) View() string {
 		}
 		return n
 	}
-	budget := avail - topH - hsH
+	budget := avail - topH
 	actWant := lines(act) + 2
 	histWant := lines(hist) + 2
 	mrsWant := lines(mrsRows) + 2
@@ -1153,24 +1142,6 @@ func (m model) View() string {
 	lb.WriteString(titledBox(lw, "ACTIVE", fmt.Sprintf("%d fixers", len(s.activeRows)), strings.Join(act, "\n"), actBoxH, false) + "\n")
 	lb.WriteString(titledBox(lw, "MRS", actMeta, strings.Join(mrsRows, "\n"), mrsBoxH, m.focus == 0) + "\n")
 	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), histBoxH, m.focus == 1) + "\n")
-
-	if len(s.hotspots) > 0 && (hsH > 0 || !wide) {
-		maxC := s.hotspots[0].count
-		if maxC < 1 {
-			maxC = 1
-		}
-		var hs []string
-		for i, h := range s.hotspots {
-			if i >= 4 {
-				break
-			}
-			hs = append(hs, fmt.Sprintf(" %s %s %s",
-				amber.Render(fmt.Sprintf("%2d×", h.count)),
-				yellow.Render(strings.Repeat("▪", max(1, h.count*10/maxC))),
-				dim.Render(trunc(h.file, lw-24))))
-		}
-		lb.WriteString(titledBox(lw, "HOTSPOTS", "most-conflicted files", strings.Join(hs, "\n"), 0, m.focus == 6) + "\n")
-	}
 
 	if m.showLog {
 		lb.WriteString(bold.Render("log ") + dim.Render(m.logName) + "\n")
@@ -1288,11 +1259,11 @@ func (m model) View() string {
 			fk = []string{key("↑↓", "scroll"), key("esc", "follow")}
 		case 3:
 			fk = []string{key("↑↓", "setting"), key("←→", "change")}
-		case 4, 5, 6:
+		case 4, 5:
 			fk = []string{key("enter", "full breakdown")}
 		}
 	}
-	fk = append(fk, key("tab", "panel"), key("2", "insights"), key("3", "fleet"), key("?", "help"), key("q", "quit"))
+	fk = append(fk, key("tab", "panel"), key("2", "hotspots"), key("3", "fleet"), key("?", "help"), key("q", "quit"))
 	b.WriteString(" " + strings.Join(fk, sep))
 	return b.String()
 }
@@ -1598,64 +1569,6 @@ func (m model) hotspotsDetailView(maxN int) string {
 	return b.String()
 }
 
-// insightsView — screen 2: runs, spend and hotspots in one place.
-func (m model) insightsView() string {
-	cut := func(v string) string {
-		// keep only the boxed part of a sub-view (no banner, no footer)
-		lines := strings.Split(v, "\n")
-		start, end := 0, len(lines)
-		// border lines start with the border-color ANSI code, not the glyph
-		for i, ln := range lines {
-			if strings.Contains(ln, "┌─") {
-				start = i
-				break
-			}
-		}
-		for i := len(lines) - 1; i >= 0; i-- {
-			if strings.Contains(lines[i], "└─") {
-				end = i + 1
-				break
-			}
-		}
-		return strings.Join(lines[start:end], "\n")
-	}
-	// fit the terminal: day depth and hotspot count derive from the height,
-	// RUNS and SPEND sit side by side when the width allows
-	sideBySide := m.width >= 150
-	nDays := m.height - 22
-	if !sideBySide {
-		nDays = (m.height - 26) / 2
-	}
-	if nDays > 14 {
-		nDays = 14
-	}
-	if nDays < 5 {
-		nDays = 5
-	}
-	hotN := (m.height - nDays - 18) / 2
-	if !sideBySide {
-		hotN = (m.height - 2*nDays - 22) / 2
-	}
-	if hotN < 3 {
-		hotN = 3
-	}
-	if hotN > 8 {
-		hotN = 8
-	}
-	var b strings.Builder
-	b.WriteString(m.renderBanner())
-	runs := cut(m.runsDetailView(nDays))
-	spend := cut(m.spendDetailView(nDays))
-	if sideBySide {
-		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, runs, spend) + "\n")
-	} else {
-		b.WriteString(runs + "\n" + spend + "\n")
-	}
-	b.WriteString(cut(m.hotspotsDetailView(hotN)) + "\n")
-	b.WriteString(" " + amber.Render("esc") + dim.Render(" back · ") + amber.Render("q") + dim.Render(" quit"))
-	return b.String()
-}
-
 // hotspotCache returns the analysis cache path for a hotspot — keyed by
 // (file, conflict count) so the text stays STABLE until new conflicts land.
 func hotspotCache(root string, h hotspot) string {
@@ -1852,7 +1765,7 @@ func (m model) fleetView() string {
 
 func (m model) helpView() string {
 	rows := [][2]string{
-		{"tab", "cycle: MRS → HISTORY → LIVE → SETTINGS → RUNS → SPEND → HOTSPOTS"},
+		{"tab", "cycle: MRS → HISTORY → LIVE → SETTINGS → RUNS → SPEND (enter opens breakdowns)"},
 		{"↑↓ / j k", "move / scroll within the focused panel"},
 		{"enter", "details: MR info + clashes, or a run's phase timeline"},
 		{"o", "open the selected MR/PR in the browser"},
@@ -1860,7 +1773,7 @@ func (m model) helpView() string {
 		{"c", "chat with the resolver about an escalated MR (⚑ rows) — in place"},
 		{"R", "retry the selected MR (clears tried/deferred marks, ticks)"},
 		{"l", "fixer/AI log panel for the selected MR"},
-		{"1 / 2 / 3", "screens: dashboard / insights (runs, spend, hotspots) / fleet"},
+		{"1 / 2 / 3", "screens: dashboard / hotspots (i = cached AI analysis) / fleet"},
 		{"r / p", "force a tick / pause the daemon"},
 		{"esc", "close things: settings, screens, log, expanded rows, live scroll"},
 		{"q", "quit"},
