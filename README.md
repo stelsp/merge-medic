@@ -1,14 +1,23 @@
-# merge-medic 🩹
+<div align="center">
+
+# 🔧 merge-medic
+
+**Self-hosted MR/PR conflict watcher that resolves merge conflicts with AI —<br>
+polls for free, refuses to guess, never touches what it shouldn't.**
 
 [![CI](https://github.com/stelsp/merge-medic/actions/workflows/ci.yml/badge.svg)](https://github.com/stelsp/merge-medic/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows%20(WSL2)-launchd%20%2F%20systemd-lightgrey)
 ![Forges](https://img.shields.io/badge/GitLab%20%7C%20GitHub-glab%20%2F%20gh-orange)
-
-**Self-hosted MR/PR conflict watcher that resolves merge conflicts with AI —
-but polls for free and refuses to guess.**
+![Models](https://img.shields.io/badge/models-Claude%20%7C%20any%20via%20aider-blueviolet)
 
 ![merge-medic live dashboard](docs/demo.gif)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/stelsp/merge-medic/main/get.sh | bash
+```
+
+</div>
 
 A launchd / systemd-timer daemon polls your open merge requests every few
 minutes with plain bash + your forge CLI — **zero tokens, zero cost**. When an
@@ -181,15 +190,26 @@ straight to theirs.
 The dashboard is **`mrtop`** — a Go /
 [bubbletea](https://github.com/charmbracelet/bubbletea) ops console built by
 `install.sh` when Go is present (a pure-bash fallback reads the same phase
-logs; `MRWATCH_PLAIN=1` forces it). Left side: **STATUS / RUNS / SPEND**
-(budget, day counters, 14-day sparkline, per-model $ spend), **ACTIVE** —
-live fixers on a segmented 8-phase path bar plus every open MR with
-mergeability, CI dot, author, age and ⚡ radar warnings — and the
-**HISTORY** ledger. The right side is a full-height **LIVE** event rail
-with wrap and scrollback. `tab` moves focus (amber border); `enter` expands
-a run's phase timeline or an MR's details, `o` opens the MR in the browser,
-`a` approves a plan, `l` shows the fixer/AI log, `r` forces a tick, `p`
-pauses, `?` help, `q` quit.
+logs; `MRWATCH_PLAIN=1` forces it). Three screens:
+
+- **`1` main** — **STATUS / RUNS / SPEND** (budget, watcher heartbeat with a
+  red warning when ticks stop, day counters, 14-day sparkline, per-model $
+  spend), **ACTIVE**: live fixers on a segmented 8-phase path bar (a stalled
+  phase gets a red ⏱ suspicion mark) plus every open MR — conflicted first —
+  with mergeability, CI dot, author, age and ⚡ radar marks, then the
+  **HISTORY** ledger; the right side is a full-height **LIVE** event rail
+  with wrap and scrollback.
+- **`2` insights** — conflict **HOTSPOTS** (the files that keep conflicting,
+  across all archived runs) and **SPEND** analytics ($/day sparkline, most
+  expensive runs).
+- **`3` fleet** — every installed instance with daemon state, today's AI
+  runs and live conflict count; `enter` re-roots the dashboard onto another
+  instance without leaving the TUI.
+
+`tab` moves focus (amber border); `enter` expands a run's phase timeline or
+an MR's details, `o` opens the MR in the browser, `a` approves a plan,
+`+`/`-` adjust the daily AI budget from the STATUS panel, `l` shows the
+fixer/AI log, `r` forces a tick, `p` pauses, `?` help, `q` quit.
 
 ## Configuration
 
