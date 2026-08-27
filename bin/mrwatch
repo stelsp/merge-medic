@@ -1,46 +1,19 @@
 #!/bin/bash
 # mrwatch — console interface to merge-medic.
 #   mrwatch             the dashboard (plain-text status when not a terminal)
+#   mrwatch chat <iid>  answer an escalated MR's questions, resume the fix
 #   mrwatch setup       interactive first-run helper: deps, logins, config
 #   mrwatch log [-f]    tail watch.log (-f = follow)
 #   mrwatch agent [iid] tail the AI resolver log (latest, or for MR <iid>)
 #   mrwatch run         run a watcher tick right now
 #   mrwatch pause       unload the scheduler job (until resume)
 #   mrwatch resume      load the scheduler job back
-# With several instances installed, plain `mrwatch` asks which project first;
-# suffixed commands (mrwatch-gh …) go straight to their instance.
 set -euo pipefail
 
 SELF="${BASH_SOURCE[0]}"
 while [ -L "$SELF" ]; do SELF="$(readlink "$SELF")"; done
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd -P)"
 
-# ── project picker ────────────────────────────────────────────────────────────
-# Plain `mrwatch` (no instance suffix) with several installed instances asks
-# which project to drive; suffixed commands (mrwatch-gh) are always direct.
-REG="$HOME/.config/merge-medic/instances"
-if [ -z "${MRWATCH_PICKED:-}" ] && [ "$(basename "$0")" = "mrwatch" ] \
-   && [ -t 0 ] && [ -f "$REG" ]; then
-  insts=()
-  while IFS= read -r r; do
-    [ -d "$r" ] && [ -x "$r/bin/mrwatch" ] && insts+=("$r")
-  done < "$REG"
-  if [ "${#insts[@]}" -gt 1 ]; then
-    echo "merge-medic instances:" >&2
-    i=1
-    for r in "${insts[@]}"; do
-      pp="$(sed -n 's/^PROJECT_PATH=["'\'']\{0,1\}\([^"'\'']*\).*/\1/p' "$r/config.env" 2>/dev/null | head -1)"
-      pv="$(sed -n 's/^PROVIDER=["'\'']\{0,1\}\([^"'\'']*\).*/\1/p' "$r/config.env" 2>/dev/null | head -1)"
-      printf '  %d) %-18s %-7s %s\n' "$i" "$(b="$(basename "$r")"; echo "${b#.}")" "${pv:-gitlab}" "${pp:-?}" >&2
-      i=$((i+1))
-    done
-    read -rp "project [1]: " pick
-    pick="${pick:-1}"
-    case "$pick" in (*[!0-9]*|'') pick=1;; esac
-    [ "$pick" -ge 1 ] && [ "$pick" -le "${#insts[@]}" ] || pick=1
-    MRWATCH_PICKED=1 exec bash "${insts[$((pick-1))]}/bin/mrwatch" "$@"
-  fi
-fi
 INST="$(basename "$ROOT")"; INST="${INST#.}"
 LABEL="com.$INST.watch"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -268,6 +241,42 @@ case "$cmd" in
     [ -z "$flog" ] && { echo "no AI logs yet"; exit 0; }
     echo "${DIM}$flog${N}"
     if [ "${2:-}" = "-f" ] || [ "${3:-}" = "-f" ]; then tail -50 -f "$flog"; else tail -50 "$flog"; fi
+    ;;
+
+  chat)
+    # Interactive escalation chat: show the bot's brief + questions, collect
+    # your answers, then (optionally) approve the continuation right away.
+    iid="${2:?usage: mrwatch chat <iid>}"
+    BRIEF="$ROOT/state/esc-$iid.md"
+    ANS="$ROOT/state/answers-$iid.md"
+    if [ ! -f "$BRIEF" ]; then
+      echo "no escalation brief for $iid (state/esc-$iid.md missing)"; exit 1
+    fi
+    echo "${B}── the bot is blocked on $iid ─────────────────────────${N}"
+    cat "$BRIEF"
+    echo
+    echo "${B}── your answers${N} ${DIM}(end with an empty line; they are fed back verbatim)${N}"
+    : > "$ANS"
+    while IFS= read -r line; do
+      [ -z "$line" ] && break
+      printf '%s
+' "$line" >> "$ANS"
+    done
+    if [ ! -s "$ANS" ]; then
+      echo "no answers recorded — nothing changes"; rm -f "$ANS"; exit 0
+    fi
+    echo "${GRN}saved${N} → state/answers-$iid.md"
+    read -rp "continue the fix now with these answers? [Y/n] " a
+    case "$a" in
+      n|N) echo "ok — approve later from the dashboard (a) or: touch state/approve-$iid && mrwatch run" ;;
+      *)
+        rm -f "$ROOT/state/tried-$iid" "$ROOT/state/dry-$iid" "$ROOT/state/deferred-$iid"
+        touch "$ROOT/state/approve-$iid"
+        echo "running a tick…"
+        bash "$ROOT/watch.sh" >/dev/null 2>&1 &
+        echo "${GRN}re-run started${N} — watch it: $(basename "$0") "
+        ;;
+    esac
     ;;
 
   setup)

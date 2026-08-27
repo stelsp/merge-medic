@@ -107,7 +107,9 @@ consider() {
     # shellcheck disable=SC2254
     case "$src" in $ab) mode="auto";; esac
   done
-  if [ "$mode" = "plan" ] && [ -f "$STATE/approve-$iid" ]; then
+  # an approve marker upgrades ANY mode to fix-approved — it also unblocks
+  # escalated auto-branch MRs after the human answered the bot's questions
+  if [ -f "$STATE/approve-$iid" ]; then
     mode="fix-approved"
     rm -f "$STATE/approve-$iid"
   fi
