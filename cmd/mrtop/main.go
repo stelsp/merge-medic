@@ -162,7 +162,7 @@ type model struct {
 	root       string
 	snap       snapshot
 	sel        int // cursor within the focused panel
-	focus      int // 0 MRS · 1 HISTORY · 2 LIVE · 3 STATUS (settings)
+	focus      int // 0 MRS · 1 HISTORY · 2 LIVE · 3 SETTINGS · 4 RUNS · 5 SPEND
 	selH       int // HISTORY cursor (kept when switching focus)
 	liveOff    int // lines scrolled up from the tail of LIVE (0 = follow)
 	expanded   map[string]bool
@@ -388,7 +388,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.expanded = map[string]bool{}
 			m.expandedMR = map[string]bool{}
 		case "tab":
-			m.focus = (m.focus + 1) % 4
+			m.focus = (m.focus + 1) % 6
 		case "up", "k":
 			if m.screen == 2 {
 				if m.selF > 0 {
@@ -440,6 +440,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.liveOff = max(0, m.liveOff-1)
 			}
 		case "enter", "e":
+			if m.screen == 0 && m.focus == 4 {
+				m.screen = 3
+				break
+			}
+			if m.screen == 0 && m.focus == 5 {
+				m.screen = 4
+				break
+			}
 			if m.screen == 2 {
 				insts := readInstances()
 				if m.selF >= 0 && m.selF < len(insts) {
@@ -792,6 +800,12 @@ func (m model) View() string {
 	if m.screen == 2 {
 		return m.fleetView()
 	}
+	if m.screen == 3 {
+		return m.runsDetailView(14)
+	}
+	if m.screen == 4 {
+		return m.spendDetailView(14)
+	}
 	s := m.snap
 	now := time.Now().Unix()
 	wide := m.width >= 110
@@ -868,7 +882,8 @@ func (m model) View() string {
 		w3 := lw - w1 - w2
 		h := max(len(statusLines), max(len(runLines), len(spendLines)))
 		boxH := func(w int, title string, lines []string) string {
-			focused := title == "STATUS" && m.focus == 3
+			focused := (title == "STATUS" && m.focus == 3) ||
+				(title == "RUNS" && m.focus == 4) || (title == "SPEND" && m.focus == 5)
 			// clip (ANSI-aware) instead of letting lipgloss wrap — a wrapped
 			// line would inflate one box past the shared height
 			clipped := make([]string, len(lines))
@@ -1248,6 +1263,8 @@ func (m model) View() string {
 			fk = []string{key("↑↓", "scroll"), key("esc", "follow")}
 		case 3:
 			fk = []string{key("↑↓", "setting"), key("←→", "change")}
+		case 4, 5:
+			fk = []string{key("enter", "full breakdown")}
 		}
 	}
 	fk = append(fk, key("tab", "panel"), key("2", "insights"), key("3", "fleet"), key("?", "help"), key("q", "quit"))
@@ -1703,7 +1720,7 @@ func (m model) fleetView() string {
 
 func (m model) helpView() string {
 	rows := [][2]string{
-		{"tab", "cycle panels: MRS → HISTORY → LIVE → SETTINGS (amber border = focused)"},
+		{"tab", "cycle: MRS → HISTORY → LIVE → SETTINGS → RUNS → SPEND (enter opens breakdowns)"},
 		{"↑↓ / j k", "move / scroll within the focused panel"},
 		{"enter", "details: MR info + clashes, or a run's phase timeline"},
 		{"o", "open the selected MR/PR in the browser"},
