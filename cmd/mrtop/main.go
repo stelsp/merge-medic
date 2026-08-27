@@ -531,24 +531,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "c":
 			if r, ok := m.selected(); ok {
 				iid := r.iid()
-				// any escalated row chats — mrwatch chat synthesizes a brief
-				// for path-pattern escalations that have none
-				esc := r.kind == "mr"
-				if !esc {
-					esc = r.it.phase == "ESCALATED"
-				}
-				if _, err := os.Stat(filepath.Join(m.root, "state", "esc-"+iid+".md")); err == nil {
-					esc = true
-				}
-				if esc {
-					mrw := filepath.Join(m.root, "bin", "mrwatch")
-					if runtime.GOOS == "darwin" {
-						script := fmt.Sprintf("tell application \"Terminal\" to do script \"bash %s chat %s\"", mrw, iid)
-						_ = exec.Command("osascript", "-e", script, "-e", `tell application "Terminal" to activate`).Start()
-					} else {
-						_ = exec.Command("x-terminal-emulator", "-e", "bash", mrw, "chat", iid).Start()
-					}
-				}
+				// the chat runs IN THIS terminal: the TUI suspends, the
+				// resolver session takes over, and the dashboard returns on
+				// exit. cwd is pinned to the instance root so the folder-trust
+				// prompt happens once, ever.
+				cmd := exec.Command("bash", filepath.Join(m.root, "bin", "mrwatch"), "chat", iid)
+				cmd.Dir = m.root
+				return m, tea.ExecProcess(cmd, func(error) tea.Msg { return tickMsg(time.Now()) })
 			}
 		case "R":
 			if r, ok := m.selected(); ok {
@@ -1676,7 +1665,7 @@ func (m model) helpView() string {
 		{"enter", "on focused RUNS / SPEND / HOTSPOTS: full-screen breakdown"},
 		{"+ / -", "budget shortcut while STATUS is focused (0 = unlimited)"},
 		{"← →", "change the selected STATUS setting (budget / delivery / model)"},
-		{"c", "chat with the bot about the selected ESCALATED MR (opens a terminal window)"},
+		{"c", "chat with the resolver about the selected MR, right here (TUI resumes on exit)"},
 		{"R", "retry the selected MR: clears tried/deferred marks and ticks (use after fixing an ESCALATED/FAIL cause)"},
 		{"1 / 2", "screens: main dashboard / fleet (instances)"},
 		{"l", "toggle AI/fixer log panel for the selected MR"},
