@@ -95,11 +95,14 @@ consider() {
     rm -f "$STATE/approve-$iid"
   fi
 
-  # deferred (branch was hot): stay quiet until the quiet period passes, then
-  # clear the markers so the fix is attempted again
+  # deferred (branch was hot): retry on every tick — the fixer re-checks the
+  # branch cheaply (fetch + git log, no AI) and re-defers if it is still hot,
+  # so the fix lands one tick after the branch has been quiet for
+  # QUIET_MINUTES, instead of a full quiet period after the last defer.
+  # The 60s grace only shields the fixer launched by the previous tick.
   if [ -f "$STATE/deferred-$iid" ]; then
     dts="$(cat "$STATE/deferred-$iid")"
-    if [ $(( $(date +%s) - dts )) -lt $(( ${QUIET_MINUTES:-15} * 60 )) ]; then
+    if [ $(( $(date +%s) - dts )) -lt 60 ]; then
       return 0
     fi
     rm -f "$STATE/deferred-$iid" "$STATE/$MARK-$iid"
