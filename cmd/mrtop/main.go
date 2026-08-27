@@ -390,10 +390,14 @@ func (m model) View() string {
 	// ── top strip: STATUS · RUNS · SPEND ──────────────────────────────────────
 	bmax, _ := strconv.Atoi(s.budgetMax)
 	bcur, _ := strconv.Atoi(s.budget)
+	budgetLine := fmt.Sprintf("%s %s %s/%s", dim.Render("ai-budget"), yellow.Render(gauge(bcur, bmax, 12)), s.budget, s.budgetMax)
+	if bmax == 0 {
+		budgetLine = fmt.Sprintf("%s %s today · %s", dim.Render("ai-budget"), s.budget, green.Render("∞ unlimited"))
+	}
 	statusLines := []string{
 		fmt.Sprintf("%s %s · daemon %s", dim.Render(string(orbit[m.frame%len(orbit)])),
 			time.Now().Format("15:04:05"), d),
-		fmt.Sprintf("%s %s %s/%s", dim.Render("ai-budget"), yellow.Render(gauge(bcur, bmax, 12)), s.budget, s.budgetMax),
+		budgetLine,
 	}
 	runLines := []string{
 		fmt.Sprintf("today  %s %s %s", green.Render(fmt.Sprintf("%d✓", s.ok)),
