@@ -221,7 +221,7 @@ radar_scan() {
     iid="${f##*/mr-}"
     # shellcheck disable=SC2034  # shas/rest are placeholders for unused fields
     read -r status shas src tgt rest < "$f" || continue
-    [ -n "$src" ] && [ -n "$tgt" ] || continue
+    if [ -z "$src" ] || [ -z "$tgt" ]; then continue; fi
     list+="$iid $src $tgt
 "
   done
