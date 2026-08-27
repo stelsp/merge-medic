@@ -1152,6 +1152,25 @@ func (m model) helpView() string {
 	for _, r := range rows {
 		b.WriteString(fmt.Sprintf("  %s  %s\n", bold.Render(fmt.Sprintf("%-9s", r[0])), r[1]))
 	}
+	b.WriteString("\n" + amberB.Render("  legend") + "\n")
+	leg := [][2]string{
+		{green.Render("✓") + " / " + red.Render("✗") + " / " + dim.Render("?"), "MR mergeable / conflicted / unknown"},
+		{green.Render("●") + red.Render("●") + yellow.Render("●") + dim.Render("·"), "CI pipeline: passed / failed / running / none"},
+		{blue.Render("⚙"), "a fixer is working on this MR right now"},
+		{dim.Render("d"), "draft MR (never auto-fixed)"},
+		{yellow.Render("⚡"), "clashes with another OPEN MR (radar) — first to merge wins"},
+		{green.Render("████") + amber.Render("▓") + dim.Render("░░░"), "fixer phase path: done / current / ahead"},
+		{red.Render("⏱"), "stalled? phase frozen for 4× its usual time — check the log"},
+		{yellow.Render("▣"), "plan posted, waiting for your approve (a)"},
+		{yellow.Render("⚑") + " / " + dim.Render("…"), "escalated to a human / deferred (branch is hot)"},
+	}
+	for _, r := range leg {
+		pad := 12 - lipgloss.Width(r[0])
+		if pad < 0 {
+			pad = 0
+		}
+		b.WriteString("  " + r[0] + strings.Repeat(" ", pad) + "  " + dim.Render(r[1]) + "\n")
+	}
 	b.WriteString("\n" + dim.Render("  CLI: mrwatch setup · log -f · agent <iid> · run · pause/resume"))
 	b.WriteString("\n\n" + dim.Render("  press ? or esc to return"))
 	return b.String()
@@ -1623,7 +1642,10 @@ func readSnapshot(root string, width int) snapshot {
 	}
 
 	// brewing conflicts between open MRs (state/radar: a|b|srcA|srcB)
-	if data, err := os.ReadFile(filepath.Join(root, "state", "radar")); err == nil {
+	if st, err := os.Stat(filepath.Join(root, "state", "radar")); err == nil && now.Sub(st.ModTime()) > 15*time.Minute {
+		// stale radar (watcher quiet) — don't show orphan warnings when the
+		// MR list itself has already aged out
+	} else if data, err := os.ReadFile(filepath.Join(root, "state", "radar")); err == nil {
 		for _, ln := range nonEmpty(strings.Split(string(data), "\n")) {
 			p := strings.Split(ln, "|")
 			if len(p) >= 4 {
