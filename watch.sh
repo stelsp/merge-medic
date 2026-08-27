@@ -176,28 +176,40 @@ else
   if [ -z "$mrs" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$mrs"; then
     log "ERROR: could not list MRs (check glab auth status / GITLAB_TOKEN)"; exit 1
   fi
-  for iid in $(jq -r '.[].iid' <<<"$mrs"); do
-    mr="$(glab api "projects/$ENC_PATH/merge_requests/$iid" 2>/dev/null || echo '{}')"
-    status="$(jq -r '.detailed_merge_status // "unknown"' <<<"$mr")"
-
-    # GitLab computes mergeability asynchronously — give it a moment
-    if [ "$status" = "checking" ] || [ "$status" = "unchecked" ]; then
-      sleep 5
+  # One request covers the whole tick: the list response carries everything
+  # except head_pipeline/base_sha — a per-MR detail request happens only when
+  # the head SHA moved (or mergeability is still being computed), so a quiet
+  # tick is a single API call instead of one per MR.
+  while IFS= read -r row; do
+    iid="$(jq -r '.iid' <<<"$row")"
+    status="$(jq -r '.detailed_merge_status // "unknown"' <<<"$row")"
+    ssha="$(jq -r '.sha // "?"' <<<"$row")"
+    old_ssha="$(cut -d' ' -f2 "$STATE/mr-$iid" 2>/dev/null | cut -d: -f1 || true)"
+    old_ci="$(cut -d' ' -f5 "$STATE/mr-$iid" 2>/dev/null || true)"
+    old_tsha="$(cut -d' ' -f2 "$STATE/mr-$iid" 2>/dev/null | cut -d: -f2 || true)"
+    if [ "$ssha" != "$old_ssha" ] || [ "$status" = "checking" ] || [ "$status" = "unchecked" ] || [ -z "$old_tsha" ]; then
       mr="$(glab api "projects/$ENC_PATH/merge_requests/$iid" 2>/dev/null || echo '{}')"
       status="$(jq -r '.detailed_merge_status // "unknown"' <<<"$mr")"
+      if [ "$status" = "checking" ] || [ "$status" = "unchecked" ]; then
+        sleep 5
+        mr="$(glab api "projects/$ENC_PATH/merge_requests/$iid" 2>/dev/null || echo '{}')"
+        status="$(jq -r '.detailed_merge_status // "unknown"' <<<"$mr")"
+      fi
+      ssha="$(jq -r '.sha // .diff_refs.head_sha // "?"' <<<"$mr")"
+      tsha="$(jq -r '.diff_refs.base_sha // "?"' <<<"$mr")"
+      ci="$(jq -r '.head_pipeline.status // "none"' <<<"$mr")"
+    else
+      tsha="${old_tsha:-?}"
+      ci="${old_ci:-none}"
     fi
-
-    src="$(jq -r '.source_branch' <<<"$mr")"
-    tgt="$(jq -r '.target_branch' <<<"$mr")"
-    title="$(jq -r '.title' <<<"$mr")"
-    draft="$(jq -r '.draft' <<<"$mr")"
-    ssha="$(jq -r '.sha // .diff_refs.head_sha // "?"' <<<"$mr")"
-    tsha="$(jq -r '.diff_refs.base_sha // "?"' <<<"$mr")"
-    ci="$(jq -r '.head_pipeline.status // "none"' <<<"$mr")"
-    author="$(jq -r '.author.username // "?"' <<<"$mr")"
-    upd="$(jq -r '.updated_at // "?"' <<<"$mr")"
+    src="$(jq -r '.source_branch' <<<"$row")"
+    tgt="$(jq -r '.target_branch' <<<"$row")"
+    title="$(jq -r '.title' <<<"$row")"
+    draft="$(jq -r '.draft' <<<"$row")"
+    author="$(jq -r '.author.username // "?"' <<<"$row")"
+    upd="$(jq -r '.updated_at // "?"' <<<"$row")"
     consider "$iid" "$src" "$tgt" "$title" "$draft" "$status" "$ssha" "$tsha" "$ci" "$author" "$upd"
-  done
+  done < <(jq -c '.[]' <<<"$mrs")
 fi
 
 # ── conflict radar: pairwise merge-tree between open MRs sharing a target ────

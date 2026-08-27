@@ -368,7 +368,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastFeed = m.snap.feed[n-1]
 				m.typeK = 0 // a fresh line starts typing itself
 			} else {
-				m.typeK += 12
+				m.typeK += 16
 			}
 		}
 		m.frame++
