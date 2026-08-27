@@ -1090,7 +1090,8 @@ func (m model) View() string {
 	const minA, minM, minH = 3, 5, 4
 	actH := min(actWant, 6)
 	histH = min(histWant, histH)
-	if m.focus == 1 {
+	if len(m.expanded) > 0 {
+		// a run's timeline is open — let HISTORY grow for it
 		histH = min(histWant, budget-minA-minM)
 	}
 	actH = max(actH, minA)
@@ -1335,12 +1336,12 @@ func padTo(sv string, w int) string {
 }
 
 // runsDetailView — enter on RUNS: per-day outcome table for two weeks.
-func (m model) runsDetailView() string {
+func (m model) runsDetailView(nDays int) string {
 	s := m.snap
 	var b strings.Builder
 	b.WriteString(m.renderBanner())
 	type day struct{ done, fail, esc, clean, ai int }
-	days := make([]day, 14)
+	days := make([]day, nDays)
 	now := time.Now()
 	day0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Unix()
 	type mrAgg struct{ done, fail, esc int }
@@ -1366,10 +1367,10 @@ func (m model) runsDetailView() string {
 				perMR[p[1]].esc++
 			}
 			age := int((day0 + 86400 - ts) / 86400)
-			if age < 0 || age >= 14 {
+			if age < 0 || age >= nDays {
 				continue
 			}
-			d := &days[13-age]
+			d := &days[nDays-1-age]
 			switch p[2] {
 			case "DONE":
 				d.done++
@@ -1403,7 +1404,7 @@ func (m model) runsDetailView() string {
 	var rows []string
 	rows = append(rows, dim.Render("  day    activity              ✓   ✗   ⚑   clean/ai"))
 	for i, d := range days {
-		date := time.Unix(day0+86400-int64(14-i)*86400, 0).Format("02.01")
+		date := time.Unix(day0+86400-int64(nDays-i)*86400, 0).Format("02.01")
 		total := d.done + d.fail + d.esc
 		if total == 0 {
 			rows = append(rows, dim.Render("  "+date+"   ·"))
@@ -1476,7 +1477,7 @@ func (m model) runsDetailView() string {
 }
 
 // spendDetailView — enter on SPEND: $/day table, per-model, top runs.
-func (m model) spendDetailView() string {
+func (m model) spendDetailView(nDays int) string {
 	s := m.snap
 	var b strings.Builder
 	b.WriteString(m.renderBanner())
@@ -1490,8 +1491,12 @@ func (m model) spendDetailView() string {
 	day0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Unix()
 	var rows []string
 	rows = append(rows, dim.Render("  day    spend"))
-	for i, v := range s.spendDaily {
-		date := time.Unix(day0+86400-int64(14-i)*86400, 0).Format("02.01")
+	sd := s.spendDaily
+	if len(sd) > nDays {
+		sd = sd[len(sd)-nDays:]
+	}
+	for i, v := range sd {
+		date := time.Unix(day0+86400-int64(len(sd)-i)*86400, 0).Format("02.01")
 		if v < 0.005 {
 			rows = append(rows, dim.Render("  "+date+"   ·"))
 			continue
@@ -1525,7 +1530,7 @@ func (m model) spendDetailView() string {
 // hotspotsDetailView — enter on HOTSPOTS: which files keep conflicting,
 // in which MRs, and how recently. Repeated names = architectural pressure:
 // split the file, or serialize the work that keeps colliding in it.
-func (m model) hotspotsDetailView() string {
+func (m model) hotspotsDetailView(maxN int) string {
 	s := m.snap
 	var b strings.Builder
 	b.WriteString(m.renderBanner())
@@ -1537,7 +1542,10 @@ func (m model) hotspotsDetailView() string {
 	if len(s.hotspots) > 0 {
 		maxC = s.hotspots[0].count
 	}
-	for _, h := range s.hotspots {
+	for hi, h := range s.hotspots {
+		if hi >= maxN {
+			break
+		}
 		mrList := "!" + strings.Join(h.mrs, " !")
 		rows = append(rows, fmt.Sprintf(" %s %s %s",
 			amber.Render(fmt.Sprintf("%3d×", h.count)),
@@ -1577,9 +1585,39 @@ func (m model) insightsView() string {
 		}
 		return strings.Join(lines[start:end], "\n")
 	}
+	// fit the terminal: day depth and hotspot count derive from the height,
+	// RUNS and SPEND sit side by side when the width allows
+	sideBySide := m.width >= 150
+	nDays := m.height - 22
+	if !sideBySide {
+		nDays = (m.height - 26) / 2
+	}
+	if nDays > 14 {
+		nDays = 14
+	}
+	if nDays < 5 {
+		nDays = 5
+	}
+	hotN := (m.height - nDays - 18) / 2
+	if !sideBySide {
+		hotN = (m.height - 2*nDays - 22) / 2
+	}
+	if hotN < 3 {
+		hotN = 3
+	}
+	if hotN > 8 {
+		hotN = 8
+	}
 	var b strings.Builder
 	b.WriteString(m.renderBanner())
-	b.WriteString(cut(m.runsDetailView()) + "\n" + cut(m.spendDetailView()) + "\n" + cut(m.hotspotsDetailView()) + "\n")
+	runs := cut(m.runsDetailView(nDays))
+	spend := cut(m.spendDetailView(nDays))
+	if sideBySide {
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, runs, spend) + "\n")
+	} else {
+		b.WriteString(runs + "\n" + spend + "\n")
+	}
+	b.WriteString(cut(m.hotspotsDetailView(hotN)) + "\n")
 	b.WriteString(" " + amber.Render("esc") + dim.Render(" back · ") + amber.Render("q") + dim.Render(" quit"))
 	return b.String()
 }
