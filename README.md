@@ -82,6 +82,7 @@ never pushes to a non-auto branch without that approve.
 | Verify gate | `VERIFY_CMD` (typecheck/build) must pass before any push |
 | Test gates | `TEST_CMD_TEMPLATE` runs tests focused on the conflicted files; `REGRESSION_CMD` runs the full suite after AI resolutions |
 | Escalation | `ESCALATE_PATTERNS` paths are never resolved by the bot; incompatible substantive changes are refused, not guessed |
+| Defer while hot | a branch pushed less than `QUIET_MINUTES` ago (or with uncommitted work in `USER_REPOS`) is DEFERRED, not raced — retried every tick for free until it goes quiet |
 | Excluded branches | branches you are actively pushing to are ignored |
 | Dedicated clone | fixers work in their own clone + per-MR worktrees, never in your checkout |
 | Scoped AI | resolver runs headless with a minimal tool allowlist; it cannot commit or push |
@@ -140,12 +141,16 @@ mrwatch run         force a tick right now
 mrwatch pause/resume
 ```
 
-`mrwatch top` has two interchangeable implementations reading the same phase
-logs: **`mrtop`** (Go / [bubbletea](https://github.com/charmbracelet/bubbletea)
-— row selection, inline log viewer, built by `install.sh` when Go is present)
-and a pure-**bash** fallback with the same layout (`MRWATCH_PLAIN=1` forces
-it). Both: spinner, in-phase interpolated bars, day counters, `l` log panel,
-`r` force tick, `p` pause/resume.
+`mrwatch top` is **`mrtop`** — a Go /
+[bubbletea](https://github.com/charmbracelet/bubbletea) dashboard built by
+`install.sh` when Go is present (a pure-bash fallback reads the same phase
+logs; `MRWATCH_PLAIN=1` forces it). The grid: **STATUS / RUNS / SPEND**
+(budget gauge, day counters, 14-day activity sparkline, per-model token
+spend in $), **ACTIVE** (live fixers with interpolated progress bars, plus
+every open MR with its state), **HISTORY** (all-time ledger) and a full-width
+**LIVE** event feed. Keys: `↑↓/jk` move, `enter` per-phase timeline of any
+run, `a` approve a plan, `l` AI/fixer log panel, `r` force tick, `p`
+pause/resume, `?` help, `esc` close, `q` quit.
 
 ## Configuration
 
@@ -164,6 +169,8 @@ Everything lives in `config.env` (gitignored; seeded from
 | `AUTO_BRANCHES` | source-branch globs fixed fully automatically (default `feat-*`); any other source gets the semi-auto flow: plan → MR comment → human approve (`a` in the dashboard) → fix that reads your comments |
 | `ESCALATE_PATTERNS` | glob paths the bot must never resolve |
 | `POST_RESOLUTION_NOTE` | `1` = comment the resolver's reasoning on the MR/PR |
+| `QUIET_MINUTES` | defer the fix while the source branch had a push this recently (retried every tick; `0` disables) |
+| `USER_REPOS` | local checkouts to inspect — uncommitted work on the branch there also defers the fix |
 | `EXCLUDE_BRANCHES` | branches to ignore (your active work) |
 | `DAILY_AGENT_RUNS` | daily cap on AI invocations |
 | `PARALLEL_FIXERS` | concurrent fixers (`1` = sequential) |
@@ -176,6 +183,7 @@ launchd / systemd user timer (every N s)
   └─ watch.sh            bash + glab/gh — free polling, edge detection,
      │                   SHA dedup, budget guard, notifications
      └─ fix-mr.sh ×N     one per conflicted MR (PARALLEL_FIXERS cap)
+        ├─ defer         branch pushed < QUIET_MINUTES ago? → retry when quiet
         ├─ git worktree  isolated per MR
         ├─ git merge     zdiff3 markers; clean? → done, 0 tokens
         ├─ escalation    protected paths / incompatible changes → human
