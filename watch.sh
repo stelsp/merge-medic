@@ -67,7 +67,8 @@ consider() {
   local iid="$1" src="$2" tgt="$3" title="$4" draft="$5" status="$6" ssha="$7" tsha="$8"
   local seen_file="$STATE/mr-$iid" prev_status
   prev_status="$(cut -d' ' -f1 "$seen_file" 2>/dev/null || echo 'none')"
-  echo "$status $ssha:$tsha" > "$seen_file"
+  # status shas src tgt title — the dashboard shows open MRs with this info
+  echo "$status $ssha:$tsha $src $tgt $title" > "$seen_file"
 
   [ "$status" != "conflict" ] && return 0
 
