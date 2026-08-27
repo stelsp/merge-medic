@@ -182,6 +182,10 @@ type model struct {
 	selS     int // STATUS settings cursor: 0 budget · 1 deliver · 2 model
 	selM     int // MRS cursor
 	selHot   int // hotspots screen cursor
+	hotFocus int // hotspots screen: 0 = file list, 1 = answer panel
+	hotOff   int // scroll offset inside the answer panel (0 = top)
+	flash      string // transient footer notice ("prompt copied")
+	flashFrame int    // frame the notice was set on (shown for ~3s)
 }
 
 func main() {
@@ -199,6 +203,10 @@ func main() {
 		}
 		m.frame = 100  // full banner name in snapshots
 		m.typeK = 1 << 20 // no mid-typing line in snapshots
+		// MRTOP_SCREEN renders a non-default screen (smoke tests, demo tapes)
+		if sc, err := strconv.Atoi(os.Getenv("MRTOP_SCREEN")); err == nil {
+			m.screen = sc
+		}
 
 		m.snap = readSnapshot(m.root, m.width)
 		fmt.Println(m.View())
@@ -352,6 +360,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if n := len(m.mrRefs()); m.selM >= n {
 			m.selM = max(0, n-1)
 		}
+		if n := len(m.snap.hotspots); m.selHot >= n {
+			m.selHot = max(0, n-1)
+		}
 		if m.showLog {
 			if r, ok := m.selected(); ok {
 				m.logName, m.logLines = readLog(m.root, r.iid())
@@ -382,6 +393,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			if m.screen != 0 {
 				m.screen = 0
+				m.hotFocus, m.hotOff = 0, 0
 				break
 			}
 			m.showHelp = false
@@ -390,6 +402,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.expanded = map[string]bool{}
 			m.expandedMR = map[string]bool{}
 		case "tab":
+			if m.screen == 5 {
+				m.hotFocus = 1 - m.hotFocus
+				break
+			}
 			m.focus = (m.focus + 1) % 6
 		case "up", "k":
 			if m.screen == 2 {
@@ -399,8 +415,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			if m.screen == 5 {
-				if m.selHot > 0 {
+				if m.hotFocus == 1 {
+					if m.hotOff > 0 {
+						m.hotOff--
+					}
+				} else if m.selHot > 0 {
 					m.selHot--
+					m.hotOff = 0
 				}
 				break
 			}
@@ -430,8 +451,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			if m.screen == 5 {
-				if m.selHot < len(m.snap.hotspots)-1 {
+				if m.hotFocus == 1 {
+					if lines, capL, _ := m.hotspotAnswer(); m.hotOff < len(lines)-capL {
+						m.hotOff++
+					}
+				} else if m.selHot < len(m.snap.hotspots)-1 {
 					m.selHot++
+					m.hotOff = 0
 				}
 				break
 			}
@@ -503,13 +529,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "i":
 			if m.screen == 5 && m.selHot < len(m.snap.hotspots) {
-				go analyzeHotspot(m.root, m.snap.hotspots[m.selHot])
+				go analyzeHotspot(m.root, m.snap.hotspots[m.selHot], hotspotModel(m.root))
+				m.hotOff = 0
+			}
+		case "y":
+			if m.screen == 5 && m.selHot < len(m.snap.hotspots) {
+				if copyClip(hotspotPrompt(m.root, m.snap.hotspots[m.selHot])) {
+					m.flash, m.flashFrame = "prompt copied to clipboard", m.frame
+				} else {
+					m.flash, m.flashFrame = "no clipboard tool found", m.frame
+				}
 			}
 		case "left", "h":
+			if m.screen == 5 {
+				m.cycleHotspotModel(-1)
+				break
+			}
 			if m.focus == 3 && m.screen == 0 {
 				m.adjustSetting(-1)
 			}
 		case "right":
+			if m.screen == 5 {
+				m.cycleHotspotModel(1)
+				break
+			}
 			if m.focus == 3 && m.screen == 0 {
 				m.adjustSetting(1)
 			}
@@ -1400,13 +1443,20 @@ func (m model) runsDetailView(nDays int) string {
 		titles[mr.iid] = mr.title
 	}
 	maxN := 1
+	activeDays, totalRuns14 := 0, 0
 	for _, d := range days {
-		if n := d.done + d.fail + d.esc; n > maxN {
-			maxN = n
+		if n := d.done + d.fail + d.esc; n > 0 {
+			activeDays++
+			totalRuns14 += n
+			if n > maxN {
+				maxN = n
+			}
 		}
 	}
+	bw := m.width
+	barW := min(48, max(18, bw-52))
 	var rows []string
-	rows = append(rows, dim.Render("  day    activity              ✓   ✗   ⚑   clean/ai"))
+	rows = append(rows, dim.Render("  day    activity"+strings.Repeat(" ", barW-6)+"✓   ✗   ⚑   clean/ai"))
 	for i, d := range days {
 		date := time.Unix(day0+86400-int64(nDays-i)*86400, 0).Format("02.01")
 		total := d.done + d.fail + d.esc
@@ -1414,12 +1464,12 @@ func (m model) runsDetailView(nDays int) string {
 			rows = append(rows, dim.Render("  "+date+"   ·"))
 			continue
 		}
-		bw := max(1, total*18/maxN)
-		bar := green.Render(strings.Repeat("█", bw*d.done/total)) +
-			red.Render(strings.Repeat("█", bw*d.fail/total)) +
-			yellow.Render(strings.Repeat("█", bw*d.esc/total))
+		w := max(1, total*barW/maxN)
+		bar := green.Render(strings.Repeat("█", w*d.done/total)) +
+			red.Render(strings.Repeat("█", w*d.fail/total)) +
+			yellow.Render(strings.Repeat("█", w*d.esc/total))
 		rows = append(rows, fmt.Sprintf("  %s  %s%s %s %s   %s",
-			dim.Render(date), padTo(bar, 20),
+			dim.Render(date), padTo(bar, barW+2),
 			green.Render(fmt.Sprintf("%3d", d.done)), red.Render(fmt.Sprintf("%3d", d.fail)),
 			yellow.Render(fmt.Sprintf("%3d", d.esc)),
 			dim.Render(fmt.Sprintf("%d/%d", d.clean, d.ai))))
@@ -1428,6 +1478,13 @@ func (m model) runsDetailView(nDays int) string {
 		fmt.Sprintf("  all time: %s %s %s · %d clean merges · %d AI resolutions",
 			green.Render(fmt.Sprintf("%d✓", s.tok)), red.Render(fmt.Sprintf("%d✗", s.tbad)),
 			yellow.Render(fmt.Sprintf("%d⚑", s.tesc)), s.tclean, s.tai))
+	if allRuns := s.tok + s.tbad + s.tesc; allRuns > 0 {
+		line := fmt.Sprintf("  success rate %d%%", s.tok*100/allRuns)
+		if activeDays > 0 {
+			line += fmt.Sprintf(" · %.1f runs per active day (14d)", float64(totalRuns14)/float64(activeDays))
+		}
+		rows = append(rows, dim.Render(line))
+	}
 
 	// what kind of work is even open right now
 	kinds := map[string]int{}
@@ -1456,7 +1513,7 @@ func (m model) runsDetailView(nDays int) string {
 	rows = append(rows, "", dim.Render("  per MR, all time (runs: ✓ fixed · ✗ failed · ⚑ escalated):"))
 	shown := 0
 	for _, iid := range mrOrder {
-		if shown >= 8 {
+		if shown >= 12 {
 			rows = append(rows, dim.Render(fmt.Sprintf("   +%d more MRs", len(mrOrder)-shown)))
 			break
 		}
@@ -1468,12 +1525,8 @@ func (m model) runsDetailView(nDays int) string {
 		rows = append(rows, fmt.Sprintf("   %s %s %s %s  %s",
 			bold.Render(fmt.Sprintf("!%-5s", iid)),
 			green.Render(fmt.Sprintf("%d✓", a.done)), red.Render(fmt.Sprintf("%d✗", a.fail)),
-			yellow.Render(fmt.Sprintf("%d⚑", a.esc)), dim.Render(trunc(t, 40))))
+			yellow.Render(fmt.Sprintf("%d⚑", a.esc)), dim.Render(trunc(t, max(30, bw-28)))))
 		shown++
-	}
-	bw := m.width
-	if bw > 72 {
-		bw = 72
 	}
 	b.WriteString(titledBox(bw, "RUNS", "last 14 days", strings.Join(rows, "\n"), 0, true) + "\n")
 	b.WriteString(" " + amber.Render("esc") + dim.Render(" back · ") + amber.Render("q") + dim.Render(" quit"))
@@ -1493,25 +1546,58 @@ func (m model) spendDetailView(nDays int) string {
 	}
 	now := time.Now()
 	day0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Unix()
+	bw := m.width
+	barW := min(48, max(18, bw-52))
 	var rows []string
 	rows = append(rows, dim.Render("  day    spend"))
 	sd := s.spendDaily
 	if len(sd) > nDays {
 		sd = sd[len(sd)-nDays:]
 	}
+	week := 0.0
 	for i, v := range sd {
 		date := time.Unix(day0+86400-int64(len(sd)-i)*86400, 0).Format("02.01")
+		if len(sd)-i <= 7 {
+			week += v
+		}
 		if v < 0.005 {
 			rows = append(rows, dim.Render("  "+date+"   ·"))
 			continue
 		}
-		bar := amber.Render(strings.Repeat("█", max(1, int(v/maxS*18))))
+		bar := amber.Render(strings.Repeat("█", max(1, int(v/maxS*float64(barW)))))
 		rows = append(rows, fmt.Sprintf("  %s  %s $%.2f",
-			dim.Render(date), padTo(bar, 20), v))
+			dim.Render(date), padTo(bar, barW+2), v))
 	}
-	rows = append(rows, "",
-		fmt.Sprintf("  today ≈$%.2f · all time $%.2f", s.spendToday, s.spend),
-		dim.Render("  per model: "+s.modelLine), "", dim.Render("  most expensive runs:"))
+	// call count + token volume, straight from the ledger
+	calls, tin, tout := 0, int64(0), int64(0)
+	if data, err := os.ReadFile(filepath.Join(m.root, "state", "tokens.log")); err == nil {
+		for _, ln := range nonEmpty(strings.Split(string(data), "\n")) {
+			p := strings.Split(ln, "|")
+			if len(p) < 7 {
+				continue
+			}
+			calls++
+			in, _ := strconv.ParseInt(p[3], 10, 64)
+			out, _ := strconv.ParseInt(p[4], 10, 64)
+			tin += in
+			tout += out
+		}
+	}
+	rows = append(rows, "", fmt.Sprintf("  today ≈$%.2f · all time $%.2f", s.spendToday, s.spend))
+	if calls > 0 {
+		rows = append(rows, dim.Render(fmt.Sprintf("  %d AI calls · avg $%.2f/call · tokens %s in → %s out",
+			calls, s.spend/float64(calls), fmtTok(tin), fmtTok(tout))))
+	}
+	if week > 0.005 {
+		rows = append(rows, dim.Render(fmt.Sprintf("  ≈$%.2f/month at the last-7-days pace", week/7*30)))
+	}
+	if s.modelLine != "" {
+		rows = append(rows, "", dim.Render("  per model:"))
+		for _, part := range strings.Split(s.modelLine, " · ") {
+			rows = append(rows, "   "+dim.Render(part))
+		}
+	}
+	rows = append(rows, "", dim.Render("  most expensive runs:"))
 	for _, r := range s.topRuns {
 		short := r.model
 		if i := strings.Index(short, "claude-"); i >= 0 {
@@ -1522,74 +1608,42 @@ func (m model) spendDetailView(nDays int) string {
 			dim.Render(fmt.Sprintf("%-14s", trunc(short, 14))),
 			dim.Render(time.Unix(r.ts, 0).Format("02.01 15:04"))))
 	}
-	bw2 := m.width
-	if bw2 > 72 {
-		bw2 = 72
-	}
-	b.WriteString(titledBox(bw2, "SPEND", "last 14 days + top runs", strings.Join(rows, "\n"), 0, true) + "\n")
+	b.WriteString(titledBox(bw, "SPEND", "last 14 days + top runs", strings.Join(rows, "\n"), 0, true) + "\n")
 	b.WriteString(" " + amber.Render("esc") + dim.Render(" back · ") + amber.Render("q") + dim.Render(" quit"))
 	return b.String()
 }
 
-// hotspotsDetailView — enter on HOTSPOTS: which files keep conflicting,
-// in which MRs, and how recently. Repeated names = architectural pressure:
-// split the file, or serialize the work that keeps colliding in it.
-func (m model) hotspotsDetailView(maxN int) string {
-	s := m.snap
-	var b strings.Builder
-	b.WriteString(m.renderBanner())
-	var rows []string
-	if len(s.hotspots) == 0 {
-		rows = append(rows, dim.Render(" no archived AI runs yet"))
-	}
-	maxC := 1
-	if len(s.hotspots) > 0 {
-		maxC = s.hotspots[0].count
-	}
-	for hi, h := range s.hotspots {
-		if hi >= maxN {
-			break
+// hotspotModel returns the model used for hotspot analyses — its own knob
+// (HOTSPOT_MODEL), falling back to the resolver's CLAUDE_MODEL.
+func hotspotModel(root string) string {
+	return readConfigVal(root, "HOTSPOT_MODEL", readConfigVal(root, "CLAUDE_MODEL", "sonnet"))
+}
+
+// cycleHotspotModel steps HOTSPOT_MODEL through the claude tiers.
+func (m *model) cycleHotspotModel(dir int) {
+	order := []string{"opus", "sonnet", "haiku"}
+	i := 0
+	for j, o := range order {
+		if o == hotspotModel(m.root) {
+			i = j
 		}
-		mrList := "!" + strings.Join(h.mrs, " !")
-		rows = append(rows, fmt.Sprintf(" %s %s %s",
-			amber.Render(fmt.Sprintf("%3d×", h.count)),
-			yellow.Render(strings.Repeat("▪", max(1, h.count*14/maxC))),
-			dim.Render(trunc(h.file, 60))))
-		rows = append(rows, dim.Render(fmt.Sprintf("       in %s · last %s",
-			trunc(mrList, 44), time.Unix(h.last, 0).Format("02.01 15:04"))))
 	}
-	rows = append(rows, "", dim.Render(" a file that keeps showing up here is a merge magnet —"),
-		dim.Render(" consider splitting it, or serializing the MRs that fight over it"))
-	bw := m.width
-	if bw > 78 {
-		bw = 78
-	}
-	b.WriteString(titledBox(bw, "HOTSPOTS", "conflict magnets, all runs", strings.Join(rows, "\n"), 0, true) + "\n")
-	b.WriteString(" " + amber.Render("esc") + dim.Render(" back · ") + amber.Render("q") + dim.Render(" quit"))
-	return b.String()
+	i = (i + dir + len(order)) % len(order)
+	setConfigVal(m.root, "HOTSPOT_MODEL", "\""+order[i]+"\"")
+	m.hotOff = 0 // a different model means a different cached answer
 }
 
 // hotspotCache returns the analysis cache path for a hotspot — keyed by
-// (file, conflict count) so the text stays STABLE until new conflicts land.
-func hotspotCache(root string, h hotspot) string {
-	sum := sha1.Sum([]byte(fmt.Sprintf("%s|%d", h.file, h.count)))
+// (file, conflict count, model) so the text stays STABLE until new conflicts
+// land, while each model keeps its own answer.
+func hotspotCache(root string, h hotspot, model string) string {
+	sum := sha1.Sum([]byte(fmt.Sprintf("%s|%d|%s", h.file, h.count, model)))
 	return filepath.Join(root, "state", fmt.Sprintf("ai-hotspot-%x.md", sum[:6]))
 }
 
-// analyzeHotspot generates the explanation once and caches it (atomic write;
-// a .run marker shows progress). Uses the instance's resolver model.
-func analyzeHotspot(root string, h hotspot) {
-	cache := hotspotCache(root, h)
-	if _, err := os.Stat(cache); err == nil {
-		return
-	}
-	run := cache + ".run"
-	if f, err := os.OpenFile(run, os.O_CREATE|os.O_EXCL, 0o644); err != nil {
-		return // already running
-	} else {
-		f.Close()
-	}
-	defer os.Remove(run)
+// hotspotPrompt builds the analysis prompt — also what `y` copies to the
+// clipboard for pasting into any external model.
+func hotspotPrompt(root string, h hotspot) string {
 	repo := readConfigVal(root, "WATCH_REPO", "")
 	if home, err := os.UserHomeDir(); err == nil {
 		repo = strings.ReplaceAll(repo, "$HOME", home)
@@ -1600,15 +1654,30 @@ func analyzeHotspot(root string, h hotspot) {
 			gitlog = string(out)
 		}
 	}
-	prompt := fmt.Sprintf(`The file %s keeps causing merge conflicts in this repository: %d AI-resolved conflicts so far, in MRs %s.
+	return fmt.Sprintf(`The file %s keeps causing merge conflicts in this repository: %d AI-resolved conflicts so far, in MRs %s.
 
 Recent commits touching it:
 %s
 
 In 8-12 lines of GitHub-flavored markdown, explain: (1) WHY this file is likely a conflict magnet (structure? shared hotspot section? append-only list?), (2) 2-3 CONCRETE ways to stop the conflicts (split points, ownership, serialization), (3) which option you would pick. No preamble.`,
 		h.file, h.count, "!"+strings.Join(h.mrs, " !"), gitlog)
-	model := readConfigVal(root, "CLAUDE_MODEL", "sonnet")
-	out, err := exec.Command("claude", "-p", prompt, "--model", model).Output()
+}
+
+// analyzeHotspot generates the explanation once and caches it (atomic write;
+// a .run marker shows progress).
+func analyzeHotspot(root string, h hotspot, model string) {
+	cache := hotspotCache(root, h, model)
+	if _, err := os.Stat(cache); err == nil {
+		return
+	}
+	run := cache + ".run"
+	if f, err := os.OpenFile(run, os.O_CREATE|os.O_EXCL, 0o644); err != nil {
+		return // already running
+	} else {
+		f.Close()
+	}
+	defer os.Remove(run)
+	out, err := exec.Command("claude", "-p", hotspotPrompt(root, h), "--model", model).Output()
 	if err != nil || len(out) == 0 {
 		return
 	}
@@ -1618,9 +1687,82 @@ In 8-12 lines of GitHub-flavored markdown, explain: (1) WHY this file is likely 
 	}
 }
 
+// copyClip puts text on the system clipboard via whichever tool exists
+// (macOS, Wayland, X11, WSL). Returns false when none is found.
+func copyClip(text string) bool {
+	for _, c := range [][]string{
+		{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard", "-in"}, {"xsel", "-ib"}, {"clip.exe"},
+	} {
+		if _, err := exec.LookPath(c[0]); err != nil {
+			continue
+		}
+		cmd := exec.Command(c[0], c[1:]...)
+		cmd.Stdin = strings.NewReader(text)
+		if cmd.Run() == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// wrapPlain word-wraps unstyled text to width w (the analysis is plain
+// markdown from the model — no ANSI to worry about).
+func wrapPlain(s string, w int) []string {
+	if w < 8 {
+		w = 8
+	}
+	var out []string
+	for _, ln := range strings.Split(s, "\n") {
+		r := []rune(ln)
+		for len(r) > w {
+			cut := w
+			for i := w; i > w/2; i-- {
+				if r[i] == ' ' {
+					cut = i
+					break
+				}
+			}
+			out = append(out, string(r[:cut]))
+			r = r[cut:]
+			for len(r) > 0 && r[0] == ' ' {
+				r = r[1:]
+			}
+		}
+		out = append(out, string(r))
+	}
+	return out
+}
+
+// hotspotAnswer returns the wrapped analysis lines for the selected hotspot
+// plus how many the WHY panel can show — shared by the renderer and the
+// scroll clamp in Update. state: ready | running | empty | none.
+func (m model) hotspotAnswer() (lines []string, capL int, state string) {
+	nRows := max(1, len(m.snap.hotspots))
+	// banner(2) + list box(nRows+2) + WHY borders(2) + footer(1) + slack(2)
+	capL = max(4, m.height-nRows-9)
+	if m.selHot >= len(m.snap.hotspots) {
+		return nil, capL, "none"
+	}
+	h := m.snap.hotspots[m.selHot]
+	cache := hotspotCache(m.root, h, hotspotModel(m.root))
+	if data, err := os.ReadFile(cache); err == nil {
+		for _, ln := range wrapPlain(strings.TrimSpace(string(data)), m.width-6) {
+			lines = append(lines, " "+ln)
+		}
+		return lines, capL, "ready"
+	}
+	if _, err := os.Stat(cache + ".run"); err == nil {
+		return nil, capL, "running"
+	}
+	return nil, capL, "empty"
+}
+
 // hotspotsScreen — the full-screen hotspot browser with on-demand AI analysis.
+// tab moves between the file list and the answer; the answer takes all the
+// remaining height and scrolls.
 func (m model) hotspotsScreen() string {
 	s := m.snap
+	bw := m.width
 	var b strings.Builder
 	b.WriteString(m.renderBanner())
 	var rows []string
@@ -1631,48 +1773,58 @@ func (m model) hotspotsScreen() string {
 	if len(s.hotspots) > 0 {
 		maxC = s.hotspots[0].count
 	}
+	fileW := max(20, bw-44)
 	for i, h := range s.hotspots {
 		row := fmt.Sprintf(" %s %s %s %s",
 			amber.Render(fmt.Sprintf("%3d×", h.count)),
 			yellow.Render(strings.Repeat("▪", max(1, h.count*12/maxC))),
-			trunc(h.file, 52),
+			trunc(h.file, fileW),
 			dim.Render("in !"+strings.Join(h.mrs, " !")))
 		if i == m.selHot {
-			row = selMark(row, m.width-6)
+			row = selMark(row, bw-6)
 		}
 		rows = append(rows, row)
 	}
-	bw := m.width
-	if bw > 100 {
-		bw = 100
-	}
-	b.WriteString(titledBox(bw, "HOTSPOTS", "conflict magnets · i = AI analysis", strings.Join(rows, "\n"), 0, true) + "\n")
+	b.WriteString(titledBox(bw, "HOTSPOTS", "conflict magnets · i = AI analysis", strings.Join(rows, "\n"), 0, m.hotFocus == 0) + "\n")
 
-	// analysis panel for the selected file
-	if m.selHot < len(s.hotspots) {
-		h := s.hotspots[m.selHot]
-		cache := hotspotCache(m.root, h)
-		body := dim.Render(" press i — the resolver explains why this file clashes and how to stop it\n" +
-			" (generated once per state; the text stays stable until new conflicts land)")
-		if data, err := os.ReadFile(cache); err == nil {
-			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-			capL := m.height - len(s.hotspots) - 12
-			if capL < 6 {
-				capL = 6
-			}
-			if len(lines) > capL {
-				lines = append(lines[:capL], dim.Render("  …"))
-			}
-			for i, ln := range lines {
-				lines[i] = " " + trunc(ln, bw-6)
-			}
-			body = strings.Join(lines, "\n")
-		} else if _, err := os.Stat(cache + ".run"); err == nil {
-			body = amber.Render(" ⠿ analyzing… (the answer will be cached)")
+	// answer panel for the selected file — fills the rest of the screen
+	lines, capL, state := m.hotspotAnswer()
+	body := dim.Render(" press i — the resolver explains why this file clashes and how to stop it\n" +
+		" (generated once per state; the text stays stable until new conflicts land)")
+	switch state {
+	case "running":
+		body = amber.Render(" " + string(spinner[m.frame%len(spinner)]) + " analyzing… (the answer will be cached)")
+	case "ready":
+		off := min(m.hotOff, max(0, len(lines)-capL))
+		end := min(len(lines), off+capL)
+		vis := append([]string{}, lines[off:end]...)
+		if off > 0 {
+			vis[0] = dim.Render(fmt.Sprintf(" ↑ %d more", off))
 		}
-		b.WriteString(titledBox(bw, "WHY", trunc(h.file, 60), body, 0, false) + "\n")
+		if rem := len(lines) - end; rem > 0 && len(vis) > 0 {
+			vis[len(vis)-1] = dim.Render(fmt.Sprintf(" ↓ %d more — tab + ↑↓ to scroll", rem))
+		}
+		body = strings.Join(vis, "\n")
 	}
-	b.WriteString(" " + amber.Render("↑↓") + dim.Render(" file · ") + amber.Render("i") + dim.Render(" analyze · ") + amber.Render("esc") + dim.Render(" back · ") + amber.Render("q") + dim.Render(" quit"))
+	meta := trunc(s.hotspots[min(m.selHot, max(0, len(s.hotspots)-1))].file, bw-40)
+	if len(s.hotspots) == 0 {
+		meta = ""
+	}
+	meta += " · model " + hotspotModel(m.root)
+	b.WriteString(titledBox(bw, "WHY", meta, body, capL, m.hotFocus == 1) + "\n")
+
+	if m.flash != "" && m.frame-m.flashFrame < 6 {
+		b.WriteString(" " + amber.Render("✔ "+m.flash))
+		return b.String()
+	}
+	if m.hotFocus == 1 {
+		b.WriteString(" " + amber.Render("↑↓") + dim.Render(" scroll · ") + amber.Render("tab") + dim.Render(" files · ") +
+			amber.Render("y") + dim.Render(" copy prompt · ") + amber.Render("esc") + dim.Render(" back"))
+	} else {
+		b.WriteString(" " + amber.Render("↑↓") + dim.Render(" file · ") + amber.Render("tab") + dim.Render(" answer · ") +
+			amber.Render("i") + dim.Render(" analyze · ") + amber.Render("←→") + dim.Render(" model · ") +
+			amber.Render("y") + dim.Render(" copy prompt · ") + amber.Render("esc") + dim.Render(" back · ") + amber.Render("q") + dim.Render(" quit"))
+	}
 	return b.String()
 }
 
@@ -1773,7 +1925,8 @@ func (m model) helpView() string {
 		{"c", "chat with the resolver about an escalated MR (⚑ rows) — in place"},
 		{"R", "retry the selected MR (clears tried/deferred marks, ticks)"},
 		{"l", "fixer/AI log panel for the selected MR"},
-		{"1 / 2 / 3", "screens: dashboard / hotspots (i = cached AI analysis) / fleet"},
+		{"1 / 2 / 3", "screens: dashboard / hotspots / fleet"},
+		{"", "hotspots: i analyze (cached) · tab+↑↓ scroll answer · ←→ model · y copy prompt"},
 		{"r / p", "force a tick / pause the daemon"},
 		{"esc", "close things: settings, screens, log, expanded rows, live scroll"},
 		{"q", "quit"},
@@ -2214,8 +2367,8 @@ func readSnapshot(root string, width int) snapshot {
 			s.topRuns = append(s.topRuns, costRun{iid: p[1], model: p[2], cost: cost, ts: ts})
 		}
 		sort.Slice(s.topRuns, func(i, j int) bool { return s.topRuns[i].cost > s.topRuns[j].cost })
-		if len(s.topRuns) > 5 {
-			s.topRuns = s.topRuns[:5]
+		if len(s.topRuns) > 8 {
+			s.topRuns = s.topRuns[:8]
 		}
 	}
 
