@@ -152,15 +152,18 @@ dashboards.
 ## CLI
 
 ```
-mrwatch             status: daemon, mode, budget, fixers, MR states
-mrwatch top         live dashboard (q quits)
-mrwatch live        merged real-time event stream — run it in a second terminal
-mrwatch mrs         live mergeability of all open MRs
+mrwatch             the dashboard (plain-text status when piped)
+mrwatch setup       interactive helper: deps, logins, config, scheduler
 mrwatch log -f      follow the watcher log
 mrwatch agent <iid> AI resolver log for one MR
 mrwatch run         force a tick right now
 mrwatch pause/resume
 ```
+
+Everything live (event feed, open MRs, history, logs) is inside the
+dashboard — one window. With several instances installed, plain `mrwatch`
+asks which project to open first; suffixed commands (`mrwatch-gh …`) go
+straight to theirs.
 
 `mrwatch top` is **`mrtop`** — a Go /
 [bubbletea](https://github.com/charmbracelet/bubbletea) dashboard built by

@@ -74,6 +74,12 @@ if [ "$INST" != "merge-medic" ]; then
 fi
 mkdir -p "$HOME/.local/bin"
 ln -sf "$ROOT/bin/mrwatch" "$HOME/.local/bin/$MRW"
+
+# Registry of installed instances — plain `mrwatch` offers a project picker
+# when more than one is present.
+REG_DIR="$HOME/.config/merge-medic"; REG="$REG_DIR/instances"
+mkdir -p "$REG_DIR"
+grep -qxF "$ROOT" "$REG" 2>/dev/null || echo "$ROOT" >> "$REG"
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) echo "  NOTE: add ~/.local/bin to your PATH" ;;
