@@ -189,6 +189,52 @@ else
   done
 fi
 
+# ── conflict radar: pairwise merge-tree between open MRs sharing a target ────
+# "Your MR will conflict with !X when either merges" — detected before it
+# hurts, for free (in-memory merge-tree, zero tokens, zero API calls).
+radar_scan() {
+  [ "${RADAR:-1}" = "1" ] || return 0
+  local out="$STATE/radar.tmp" list="" f iid status shas src tgt rest
+  : > "$out"
+  for f in "$STATE"/mr-*; do
+    [ -f "$f" ] || continue
+    iid="${f##*/mr-}"
+    # shellcheck disable=SC2034  # shas/rest are placeholders for unused fields
+    read -r status shas src tgt rest < "$f" || continue
+    [ -n "$src" ] && [ -n "$tgt" ] || continue
+    list+="$iid $src $tgt
+"
+  done
+  if [ "$(printf '%s' "$list" | grep -c . || true)" -lt 2 ]; then
+    mv "$out" "$STATE/radar"; return 0
+  fi
+  if [ ! -d "$WATCH_REPO/.git" ]; then
+    git clone --quiet "$GIT_REMOTE_URL" "$WATCH_REPO" >>"$LOG" 2>&1 || { rm -f "$out"; return 0; }
+  fi
+  git -C "$WATCH_REPO" fetch --prune --quiet origin >>"$LOG" 2>&1 || { rm -f "$out"; return 0; }
+  local pairs=0 a_iid a_src a_tgt b_iid b_src b_tgt
+  while IFS=' ' read -r a_iid a_src a_tgt; do
+    [ -z "$a_iid" ] && continue
+    while IFS=' ' read -r b_iid b_src b_tgt; do
+      [ -z "$b_iid" ] && continue
+      [ "$a_iid" -lt "$b_iid" ] 2>/dev/null || continue
+      [ "$a_tgt" = "$b_tgt" ] || continue
+      pairs=$((pairs+1)); [ "$pairs" -gt 30 ] && break 2
+      git -C "$WATCH_REPO" rev-parse --quiet --verify "origin/$a_src" >/dev/null 2>&1 || continue
+      git -C "$WATCH_REPO" rev-parse --quiet --verify "origin/$b_src" >/dev/null 2>&1 || continue
+      if ! git -C "$WATCH_REPO" merge-tree --write-tree "origin/$a_src" "origin/$b_src" >/dev/null 2>&1; then
+        printf '%s|%s|%s|%s\n' "$a_iid" "$b_iid" "$a_src" "$b_src" >> "$out"
+        if ! grep -qF "$a_iid|$b_iid|" "$STATE/radar" 2>/dev/null; then
+          log "RADAR: $SIGIL$a_iid ($a_src) and $SIGIL$b_iid ($b_src) conflict with EACH OTHER — first to merge wins"
+          notify "Radar: $SIGIL$a_iid × $SIGIL$b_iid" "$a_src and $b_src conflict with each other"
+        fi
+      fi
+    done <<<"$list"
+  done <<<"$list"
+  mv "$out" "$STATE/radar"
+}
+radar_scan
+
 if [ -z "$targets" ]; then
   [ "$verbose" = "1" ] && log "no new conflicts to fix"
   exit 0

@@ -71,6 +71,12 @@ comments right on the MR, and presses `a` in the dashboard; the approved run
 executes the plan with those comments as overriding instructions. The bot
 never pushes to a non-auto branch without that approve.
 
+**Conflict radar.** Conflicts are detected *between open MRs* before anyone
+merges: every poll runs free in-memory `git merge-tree` checks across MRs
+sharing a target and warns — in the dashboard (⚡) and as a notification —
+that "!104 and !107 conflict with each other; first to merge wins". No other
+tool does this; here it costs zero tokens and zero API calls.
+
 ## How it stays cheap and safe
 
 | Guard | What it does |
@@ -199,6 +205,7 @@ Everything lives in `config.env` (gitignored; seeded from
 | `QUIET_MINUTES` | defer the fix while the source branch had a push this recently (retried every tick; `0` disables) |
 | `USER_REPOS` | local checkouts to inspect — uncommitted work on the branch there also defers the fix |
 | `INCLUDE_BRANCHES` | allowlist of source-branch globs — when set, everything else is ignored entirely |
+| `RADAR` | `1` (default) — warn when two open MRs conflict with each other (free merge-tree checks) |
 | `EXCLUDE_BRANCHES` | branches to ignore (your active work) |
 | `DAILY_AGENT_RUNS` | daily cap on AI invocations |
 | `PARALLEL_FIXERS` | concurrent fixers (`1` = sequential) |
