@@ -37,7 +37,7 @@ var (
 	amber   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	amberB  = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
 	borderC = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	selRow  = lipgloss.NewStyle().Background(lipgloss.Color("58"))
+	selRow  = lipgloss.NewStyle().Background(lipgloss.Color("214")).Foreground(lipgloss.Color("235"))
 	// body of a panel: sharp border, no top edge — the top line is drawn by
 	// titledBox with the title embedded in the border itself
 	section = lipgloss.NewStyle().
@@ -551,7 +551,7 @@ func (m model) inlineSelect(cur string) string {
 			lbl = " ●" + o + " "
 		}
 		if i == m.pickSel {
-			parts = append(parts, selRow.Render(amberB.Render(lbl)))
+			parts = append(parts, selRow.Render(lbl))
 		} else {
 			parts = append(parts, dim.Render(lbl))
 		}
@@ -570,10 +570,14 @@ func (m model) pickOptions() []string {
 	return nil
 }
 
-// selMark highlights the selected row: amber left bar + warm background.
-func selMark(row string) string {
+// selMark highlights the selected row: amber bar + a full-width amber fill
+// (same color as the focused border), padded to the panel's content width.
+func selMark(row string, w int) string {
 	if strings.HasPrefix(row, " ") {
 		row = row[1:]
+	}
+	if pad := w - 1 - lipgloss.Width(row); pad > 0 {
+		row += strings.Repeat(" ", pad)
 	}
 	return amberB.Render("▎") + selRow.Render(row)
 }
@@ -643,7 +647,7 @@ func (m model) renderRow(it item, idx int, now int64, aw int) string {
 		style.Render(fmt.Sprintf("%-10s", it.phase)), el/60, el%60,
 		dim.Render(tag), dim.Render(trunc(detail, aw-48)))
 	if idx == m.sel && m.focus == 1 {
-		row = selMark(row)
+		row = selMark(row, aw)
 	}
 	if m.expanded[it.key()] {
 		row += "\n" + m.renderTimeline(it)
@@ -682,7 +686,7 @@ func (m model) renderHistRow(it item, idx int, aw int) string {
 		style.Render(fmt.Sprintf("%-10s", it.phase)), dur,
 		dim.Render(tag), dim.Render(trunc(detail, aw-48)))
 	if idx == m.selH && m.focus == 2 {
-		row = selMark(row)
+		row = selMark(row, aw)
 	}
 	if m.expanded[it.key()] {
 		row += "\n" + m.renderTimeline(it)
@@ -985,7 +989,7 @@ func (m model) View() string {
 				dim.Render(fmt.Sprintf("%-8s", trunc(mr.author, 8))),
 				titleStyled(title, tstyle, aw-(31+bcol)))
 			if idx == m.sel && m.focus == 1 {
-				row = selMark(row)
+				row = selMark(row, aw)
 			}
 			if m.expandedMR[mr.iid] {
 				row += "\n" + dim.Render(trunc(fmt.Sprintf("      %s → %s · by %s · updated %s ago · CI %s",
@@ -1102,7 +1106,7 @@ func (m model) View() string {
 			// with LIVE focused, the cursor line sits at the bottom of the
 			// window and j/k walk it line by line
 			if m.focus == 3 && len(wl) > 0 {
-				wl[len(wl)-1] = selMark(wl[len(wl)-1])
+				wl[len(wl)-1] = selMark(wl[len(wl)-1], liveW-4)
 			}
 			body = strings.Join(wl, "\n")
 		}
@@ -1262,7 +1266,7 @@ func (m model) fleetView() string {
 			bold.Render(fmt.Sprintf("%-16s", name)), dim.Render(fmt.Sprintf("%-7s", pv)),
 			trunc(pp, 40), d, spent, st)
 		if i == m.selF {
-			row = selMark(row)
+			row = selMark(row, m.width-4)
 		}
 		rows = append(rows, row)
 	}
