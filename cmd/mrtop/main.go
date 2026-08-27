@@ -320,11 +320,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "esc", "q":
 				m.pickKind = ""
-			case "up", "k":
+			case "up", "k", "left", "h":
 				if m.pickSel > 0 {
 					m.pickSel--
 				}
-			case "down", "j":
+			case "down", "j", "right", "l":
 				if m.pickSel < len(opts)-1 {
 					m.pickSel++
 				}
@@ -539,6 +539,24 @@ func segBar(ph string, frame int) string {
 		}
 	}
 	return b.String()
+}
+
+// inlineSelect renders the options inside the STATUS line itself: the
+// cursored option glows amber, the currently-applied one carries a dot.
+func (m model) inlineSelect(cur string) string {
+	var parts []string
+	for i, o := range m.pickOptions() {
+		lbl := " " + o + " "
+		if o == cur {
+			lbl = " ●" + o + " "
+		}
+		if i == m.pickSel {
+			parts = append(parts, selRow.Render(amberB.Render(lbl)))
+		} else {
+			parts = append(parts, dim.Render(lbl))
+		}
+	}
+	return strings.Join(parts, "") + " " + dim.Render("←→ · enter · esc")
 }
 
 // pickOptions returns the choices for the active modal picker.
@@ -767,9 +785,6 @@ func (m model) View() string {
 	if m.showHelp {
 		return m.helpView()
 	}
-	if m.pickKind != "" {
-		return m.pickerView()
-	}
 	if m.screen == 1 {
 		return m.insightsView()
 	}
@@ -815,15 +830,22 @@ func (m model) View() string {
 	if s.resolver != "claude" {
 		modelLine2 = dim.Render("model   ") + amber.Render(s.model) + dim.Render(" ("+s.resolver+", config.env)")
 	}
+	if m.pickKind == "model" {
+		modelLine2 = dim.Render("model   ") + m.inlineSelect(s.model)
+	}
 	pm := green.Render("direct push")
 	if s.pushMode == "mr" {
 		pm = yellow.Render("via resolution MR")
+	}
+	deliverLine := dim.Render("deliver ") + pm + " " + dim.Render("m")
+	if m.pickKind == "deliver" {
+		deliverLine = dim.Render("deliver ") + m.inlineSelect(s.pushMode)
 	}
 	statusLines := []string{
 		fmt.Sprintf("%s %s · daemon %s", amber.Render(string(orbit[m.frame%len(orbit)])),
 			time.Now().Format("15:04:05"), d),
 		budgetLine,
-		dim.Render("deliver ") + pm + " " + dim.Render("m"),
+		deliverLine,
 		modelLine2,
 	}
 	if s.lastErr != "" {
@@ -1247,44 +1269,6 @@ func (m model) fleetView() string {
 	b.WriteString(titledBox(m.width, "FLEET", fmt.Sprintf("%d instances", len(insts)), strings.Join(rows, "\n"), 0, true) + "\n")
 	b.WriteString(" " + amber.Render("↑↓") + dim.Render(" move · ") + amber.Render("enter") + dim.Render(" switch dashboard to instance · ") + amber.Render("1") + dim.Render(" main · ") + amber.Render("2") + dim.Render(" insights · ") + amber.Render("q") + dim.Render(" quit"))
 	return b.String()
-}
-
-// pickerView renders the centered modal select.
-func (m model) pickerView() string {
-	title := "MODEL"
-	desc := "resolver model for the next fixes"
-	cur := m.snap.model
-	if m.pickKind == "deliver" {
-		title = "DELIVERY"
-		desc = "how fixes reach the branch"
-		cur = m.snap.pushMode
-	}
-	labels := map[string]string{
-		"opus":   "best quality, priciest",
-		"sonnet": "strong + ~5× cheaper",
-		"haiku":  "fastest, cheapest",
-		"direct": "push straight into the source branch",
-		"mr":     "open a resolution MR — branch untouched",
-	}
-	var rows []string
-	for i, o := range m.pickOptions() {
-		mark := "  "
-		if o == cur {
-			mark = green.Render("● ")
-		}
-		row := fmt.Sprintf(" %s%-8s %s", mark, o, dim.Render(labels[o]))
-		if i == m.pickSel {
-			row = selMark(row)
-		}
-		rows = append(rows, row)
-	}
-	rows = append(rows, "", dim.Render(" ↑↓ choose · enter apply · esc cancel"))
-	boxW := 56
-	if boxW > m.width-4 {
-		boxW = m.width - 4
-	}
-	modal := titledBox(boxW, title, desc, strings.Join(rows, "\n"), 0, true)
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
 
 func (m model) helpView() string {
