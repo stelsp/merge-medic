@@ -1,24 +1,26 @@
 // The fixer phase ladder: expected order, progress mapping, terminal states.
 package main
 
-type phaseInfo struct{ base, next, avg int }
+// phases maps each phase to how long it typically takes (seconds) — stale
+// detection flags a fixer that sits in one phase for more than 4× this.
+type phaseInfo struct{ avg int }
 
 var phases = map[string]phaseInfo{
-	"START":       {3, 10, 3},
-	"WORKTREE":    {10, 25, 5},
-	"MERGE":       {25, 45, 10},
-	"MERGE_CLEAN": {45, 70, 2},
-	"AI_RESOLVE":  {45, 70, 90},
-	"PLAN":        {45, 70, 60},
-	"VERIFY":      {70, 80, 150},
-	"TESTS":       {80, 88, 60},
-	"REGRESSION":  {88, 95, 180},
-	"PUSH":        {95, 99, 5},
-	"DONE":        {100, 100, 1},
-	"FAIL":        {100, 100, 1},
-	"ESCALATED":   {100, 100, 1},
-	"PLANNED":     {100, 100, 1},
-	"DEFERRED":    {0, 0, 1},
+	"START":       {3},
+	"WORKTREE":    {5},
+	"MERGE":       {10},
+	"MERGE_CLEAN": {2},
+	"AI_RESOLVE":  {90},
+	"PLAN":        {60},
+	"VERIFY":      {150},
+	"TESTS":       {60},
+	"REGRESSION":  {180},
+	"PUSH":        {5},
+	"DONE":        {1},
+	"FAIL":        {1},
+	"ESCALATED":   {1},
+	"PLANNED":     {1},
+	"DEFERRED":    {1},
 }
 
 func terminal(phase string) bool {
@@ -50,19 +52,4 @@ func phaseSlot(ph string) int {
 		return 7
 	}
 	return 8
-}
-
-func phasePct(phase string, inPhase int) int {
-	p, ok := phases[phase]
-	if !ok {
-		return 0
-	}
-	if p.base >= 100 {
-		return 100
-	}
-	prog := inPhase * (p.next - p.base) / p.avg
-	if prog > p.next-p.base {
-		prog = p.next - p.base
-	}
-	return p.base + prog
 }

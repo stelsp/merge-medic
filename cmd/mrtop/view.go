@@ -23,11 +23,6 @@ func (m model) renderRow(it item, idx int, now int64, aw int) string {
 			mark = red.Render("⏱")
 		}
 	}
-	inPhase := int(now - it.ts)
-	if terminal(it.phase) {
-		inPhase = 0
-	}
-	pct := phasePct(it.phase, inPhase)
 	el := it.ts - it.t0
 	if it.active && !terminal(it.phase) {
 		el = now - it.t0
@@ -51,7 +46,6 @@ func (m model) renderRow(it item, idx int, now int64, aw int) string {
 	if tag == "" || tag == "none" {
 		tag = "  "
 	}
-	_ = pct
 	detail := it.detail
 	if stale {
 		detail = "stalled? no phase progress for " + fmtAge(now-it.ts) + " — check the log (l)"
@@ -157,13 +151,12 @@ func (m model) mrsRadar(aw int) []string {
 	var out []string
 	seenHub := map[string]bool{}
 	for _, p := range m.snap.radarPairs {
-		hub, other := "", ""
+		hub := ""
 		if count[p.a] >= 3 {
-			hub, other = p.a, p.b
+			hub = p.a
 		} else if count[p.b] >= 3 {
-			hub, other = p.b, p.a
+			hub = p.b
 		}
-		_ = other
 		if hub != "" {
 			if !seenHub[hub] {
 				seenHub[hub] = true

@@ -29,23 +29,17 @@ func TestPhaseSlotOrder(t *testing.T) {
 	}
 }
 
-func TestPhasePctBounds(t *testing.T) {
-	for ph := range phases {
-		for _, sec := range []int{0, 1, 100, 100000} {
-			pct := phasePct(ph, sec)
-			if pct < 0 || pct > 100 {
-				t.Errorf("phasePct(%q, %d) = %d out of [0,100]", ph, sec, pct)
-			}
+func TestPhasesTableSane(t *testing.T) {
+	// stale detection divides by avg — a zero would panic the render loop
+	for ph, p := range phases {
+		if p.avg <= 0 {
+			t.Errorf("phases[%q].avg = %d, must be positive", ph, p.avg)
 		}
 	}
-	if phasePct("NO_SUCH_PHASE", 5) != 0 {
-		t.Error("unknown phase must map to 0")
-	}
-	if phasePct("DONE", 0) != 100 {
-		t.Error("DONE must map to 100")
-	}
-	// progress within a phase never spills past the phase's ceiling
-	if got := phasePct("AI_RESOLVE", 1<<20); got > 70 {
-		t.Errorf("AI_RESOLVE overflow: %d > 70", got)
+	// every terminal state must be in the table (stale detection looks it up)
+	for _, ph := range []string{"DONE", "FAIL", "ESCALATED", "PLANNED", "DEFERRED"} {
+		if _, ok := phases[ph]; !ok {
+			t.Errorf("terminal phase %q missing from phases table", ph)
+		}
 	}
 }

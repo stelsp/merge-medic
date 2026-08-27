@@ -5,6 +5,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=lib.sh
+source "$ROOT/lib.sh"
 INTERVAL="${MERGE_MEDIC_INTERVAL:-180}"   # seconds between watcher ticks
 OS="$(uname -s)"
 # Instance name = install dir basename (multiple clones watch multiple repos,
@@ -23,10 +25,10 @@ if [ ! -f "$ROOT/config.env" ]; then
 fi
 
 # ── dependencies (forge CLI depends on PROVIDER: glab for gitlab, gh for github)
-PROVIDER="$(sed -n 's/^PROVIDER=["'\'']\{0,1\}\([a-z]*\).*/\1/p' "$ROOT/config.env" | head -1)"
+PROVIDER="$(mm_cfg_get "$ROOT/config.env" PROVIDER)"
 PROVIDER="${PROVIDER:-gitlab}"
 FORGE_CLI="glab"; [ "$PROVIDER" = "github" ] && FORGE_CLI="gh"
-RESOLVER="$(sed -n 's/^RESOLVER=["'\'']\{0,1\}\([a-z]*\).*/\1/p' "$ROOT/config.env" | head -1)"
+RESOLVER="$(mm_cfg_get "$ROOT/config.env" RESOLVER)"
 RESOLVER="${RESOLVER:-claude}"
 RESOLVER_DEP="$RESOLVER"; [ "$RESOLVER" = "custom" ] && RESOLVER_DEP=""
 echo "  provider: $PROVIDER (forge CLI: $FORGE_CLI) · resolver: $RESOLVER"

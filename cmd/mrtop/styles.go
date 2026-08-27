@@ -9,9 +9,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Night-shift ops console: sharp single borders, one amber accent for
-// identity/keys/titles, colors otherwise reserved for state (green/red/
-// yellow), terminal-transparent background.
 var (
 	bold    = lipgloss.NewStyle().Bold(true)
 	dim     = lipgloss.NewStyle().Faint(true)

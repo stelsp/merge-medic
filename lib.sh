@@ -35,7 +35,28 @@ mm_filesize() {
   stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null || echo 0
 }
 
+# True when the configured forge is GitHub (default: GitLab).
+mm_is_github() {
+  [ "${PROVIDER:-gitlab}" = "github" ]
+}
+
 # Reference sigil for MR/PR ids: GitLab !42, GitHub #42.
 mm_ref_sigil() {
-  if [ "${PROVIDER:-gitlab}" = "github" ]; then printf '#'; else printf '!'; fi
+  if mm_is_github; then printf '#'; else printf '!'; fi
+}
+
+# True when branch $1 matches any glob in AUTO_BRANCHES (default feat-*) —
+# such sources are fixed fully automatically, everything else needs approval.
+mm_src_is_auto() {
+  local src="$1" ab
+  for ab in ${AUTO_BRANCHES:-feat-*}; do
+    # shellcheck disable=SC2254  # unquoted on purpose: $ab is the glob
+    case "$src" in $ab) return 0;; esac
+  done
+  return 1
+}
+
+# Read KEY out of config file $1 without sourcing it (quotes stripped).
+mm_cfg_get() {
+  sed -n "s/^$2=[\"']\{0,1\}\([^\"']*\).*/\1/p" "$1" | head -1
 }

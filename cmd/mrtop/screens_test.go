@@ -3,9 +3,10 @@ package main
 import "testing"
 
 func TestHotspotCacheStable(t *testing.T) {
-	h := hotspot{file: "a/b.go", count: 3, mrs: []string{"1", "2"}}
-	if hotspotCache("/root", h, "sonnet") != hotspotCache("/root", h, "sonnet") {
-		t.Error("cache path must be deterministic")
+	a := hotspotCache("/root", hotspot{file: "a/b.go", count: 3, mrs: []string{"1", "2"}}, "sonnet")
+	b := hotspotCache("/root", hotspot{file: "a/b.go", count: 3, mrs: []string{"9"}}, "sonnet")
+	if a != b {
+		t.Error("cache path must depend only on (file, count, model) — not on the MR list")
 	}
 }
 
