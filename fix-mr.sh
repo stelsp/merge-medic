@@ -430,12 +430,35 @@ if [ -n "${REGRESSION_CMD:-}" ] && { [ "$when" = "always" ] || { [ "$when" = "ai
   ( eval "$REGRESSION_CMD" ) >> "$LOGDIR/fixer-$IID.log" 2>&1 || fail "regression suite red (fixer-$IID.log)"
 fi
 
-ev PUSH "origin $SRC"
-git push origin "HEAD:$SRC" >/dev/null 2>&1 || fail "push rejected (branch moved ahead?)"
+# ── push: direct (into the source branch) or via a resolution MR/PR ───────────
+res_link=""
+if [ "${PUSH_MODE:-direct}" = "mr" ]; then
+  FIXBR="merge-medic/fix-$IID-$(date +%s)"
+  ev PUSH "resolution branch $FIXBR"
+  git push origin "HEAD:refs/heads/$FIXBR" >/dev/null 2>&1 || fail "push of $FIXBR rejected"
+  res_title="merge-medic: resolve conflicts of ${SIGIL}$IID ($SRC <- $TGT)"
+  res_body="Automated conflict resolution for ${SIGIL}$IID. Merge this into \`$SRC\` to clear the conflict — your branch is untouched until you do."
+  if [ "${PROVIDER:-gitlab}" = "github" ]; then
+    res_link="$(gh pr create --repo "$PROJECT_PATH" --head "$FIXBR" --base "$SRC" \
+      --title "$res_title" --body "$res_body" 2>>"$LOGDIR/fixer-$IID.log" || true)"
+  else
+    res_link="$(GITLAB_HOST="${GITLAB_HOST:-}" glab api "projects/:fullpath/merge_requests" \
+      -f "source_branch=$FIXBR" -f "target_branch=$SRC" -f "title=$res_title" \
+      -f "description=$res_body" -f remove_source_branch=true 2>>"$LOGDIR/fixer-$IID.log" \
+      | jq -r '.web_url // empty' || true)"
+  fi
+  [ -n "$res_link" ] || fail "resolution branch pushed but the MR/PR could not be created ($FIXBR)"
+  ev DONE "resolution MR ready: $res_link"
+  ledger DONE
+  notify "${SIGIL}$IID resolved ✓" "review & merge: $res_link"
+else
+  ev PUSH "origin $SRC"
+  git push origin "HEAD:$SRC" >/dev/null 2>&1 || fail "push rejected (branch moved ahead?)"
 
-ev DONE "merged origin/$TGT, gates green, pushed"
-ledger DONE
-notify "${SIGIL}$IID fixed ✓" "$SRC: merge $TGT + gates + push"
+  ev DONE "merged origin/$TGT, gates green, pushed"
+  ledger DONE
+  notify "${SIGIL}$IID fixed ✓" "$SRC: merge $TGT + gates + push"
+fi
 if [ "$ai_ran" = "1" ] && [ -n "$summary" ]; then
   g_tests="—"; [ -n "${TEST_CMD_TEMPLATE:-}" ] && g_tests="✅ \`$(printf '%s' "$TEST_CMD_TEMPLATE" | cut -c1-60)\`"
   g_regr="—"
@@ -443,6 +466,11 @@ if [ "$ai_ran" = "1" ] && [ -n "$summary" ]; then
     g_regr="✅ \`$(printf '%s' "$REGRESSION_CMD" | cut -c1-60)\`"
   fi
   approved_tag=""; [ "$MODE" = "fix-approved" ] && approved_tag=" · human-approved plan"
+  if [ -n "$res_link" ]; then
+    tail_note="**Your branch is untouched.** The resolution lives in its own MR — review the diff and merge it: $res_link"
+  else
+    tail_note="<sub>The merge commit is on the branch — review as usual; nothing was merged into \`$TGT\`.</sub>"
+  fi
   post_note "## 🩹 merge-medic — conflicts resolved automatically
 
 **MR:** \`$SRC\` → \`$TGT\` (${SIGIL}$IID) · **Mode:** AI resolution$approved_tag
@@ -459,6 +487,6 @@ $summary
 | focused tests | $g_tests |
 | regression | $g_regr |
 
-<sub>The merge commit is on the branch — review as usual; nothing was merged into \`$TGT\`.</sub>"
+$tail_note"
 fi
 cleanup_wt

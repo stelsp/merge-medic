@@ -190,6 +190,8 @@ Everything lives in `config.env` (gitignored; seeded from
 | `TEST_CMD_TEMPLATE` | focused tests, `{files}` = conflicted paths |
 | `REGRESSION_CMD` / `REGRESSION_WHEN` | full suite gate: `ai` (default) / `always` / `never` |
 | `RESOLVER` | `claude` (default) / `aider` (any model via API keys: `RESOLVER_MODEL`) / `custom` (`RESOLVER_CMD`) |
+| `PUSH_MODE` | `direct` (default: merge commit pushed into the source branch) / `mr` (your branch is never touched — the resolution is opened as its own MR/PR into it, you review and merge) |
+| `TRUSTED_AUTHORS` | usernames whose plan comments the approved run obeys (default: the MR author only) |
 | `RESOLVE_POLICY_FILE` | project-specific resolution rules appended to the prompt |
 | `AUTO_BRANCHES` | source-branch globs fixed fully automatically (default `feat-*`); any other source gets the semi-auto flow: plan → MR comment → human approve (`a` in the dashboard) → fix that reads your comments |
 | `ESCALATE_PATTERNS` | glob paths the bot must never resolve |
