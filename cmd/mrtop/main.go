@@ -162,8 +162,7 @@ type model struct {
 	root       string
 	snap       snapshot
 	sel        int // cursor within the focused panel
-	focus      int // 0 MRS · 1 HISTORY · 2 LIVE
-	settings   bool // s: the STATUS panel holds the cursor (↑↓ rows, ←→ change)
+	focus      int // 0 MRS · 1 HISTORY · 2 LIVE · 3 STATUS (settings)
 	selH       int // HISTORY cursor (kept when switching focus)
 	liveOff    int // lines scrolled up from the tail of LIVE (0 = follow)
 	expanded   map[string]bool
@@ -379,10 +378,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "3":
 			m.screen = 2
 		case "esc":
-			if m.settings {
-				m.settings = false
-				break
-			}
 			if m.screen != 0 {
 				m.screen = 0
 				break
@@ -393,7 +388,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.expanded = map[string]bool{}
 			m.expandedMR = map[string]bool{}
 		case "tab":
-			m.focus = (m.focus + 1) % 3
+			m.focus = (m.focus + 1) % 4
 		case "up", "k":
 			if m.screen == 2 {
 				if m.selF > 0 {
@@ -401,7 +396,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				break
 			}
-			if m.settings {
+			if m.focus == 3 {
 				if m.selS > 0 {
 					m.selS--
 				}
@@ -426,7 +421,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				break
 			}
-			if m.settings {
+			if m.focus == 3 {
 				if m.selS < 2 {
 					m.selS++
 				}
@@ -484,16 +479,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
 				_ = c.Start()
 			}
-		case "s":
-			if m.screen == 0 {
-				m.settings = !m.settings
-			}
 		case "left", "h":
-			if m.settings && m.screen == 0 {
+			if m.focus == 3 && m.screen == 0 {
 				m.adjustSetting(-1)
 			}
 		case "right":
-			if m.settings && m.screen == 0 {
+			if m.focus == 3 && m.screen == 0 {
 				m.adjustSetting(1)
 			}
 		case "c":
@@ -877,13 +868,13 @@ func (m model) View() string {
 		w3 := lw - w1 - w2
 		h := max(len(statusLines), max(len(runLines), len(spendLines)))
 		boxH := func(w int, title string, lines []string) string {
-			focused := title == "STATUS" && m.settings
+			focused := title == "STATUS" && m.focus == 3
 			// clip (ANSI-aware) instead of letting lipgloss wrap — a wrapped
 			// line would inflate one box past the shared height
 			clipped := make([]string, len(lines))
 			for i, ln := range lines {
 				clipped[i] = truncate.String(ln, uint(max(1, w-4)))
-				if title == "STATUS" && m.settings && m.screen == 0 && i == m.selS+1 {
+				if title == "STATUS" && m.focus == 3 && m.screen == 0 && i == m.selS+1 {
 					clipped[i] = selMark(clipped[i], w-4)
 				}
 			}
@@ -1236,9 +1227,7 @@ func (m model) View() string {
 	key := func(k, label string) string { return amber.Render(k) + dim.Render(" "+label) }
 	sep := dim.Render(" · ")
 	var fk []string
-	if m.settings {
-		fk = []string{key("↑↓", "setting"), key("←→", "change"), key("esc", "done")}
-	} else {
+	{
 		switch m.focus {
 		case 0:
 			if r, ok := m.selected(); ok {
@@ -1257,9 +1246,11 @@ func (m model) View() string {
 			fk = []string{key("enter", "timeline"), key("o", "open"), key("l", "log"), key("R", "retry")}
 		case 2:
 			fk = []string{key("↑↓", "scroll"), key("esc", "follow")}
+		case 3:
+			fk = []string{key("↑↓", "setting"), key("←→", "change")}
 		}
 	}
-	fk = append(fk, key("tab", "panel"), key("s", "settings"), key("2", "insights"), key("3", "fleet"), key("?", "help"), key("q", "quit"))
+	fk = append(fk, key("tab", "panel"), key("2", "insights"), key("3", "fleet"), key("?", "help"), key("q", "quit"))
 	b.WriteString(" " + strings.Join(fk, sep))
 	return b.String()
 }
@@ -1711,7 +1702,7 @@ func (m model) fleetView() string {
 
 func (m model) helpView() string {
 	rows := [][2]string{
-		{"tab", "cycle panels: MRS → HISTORY → LIVE (amber border = focused)"},
+		{"tab", "cycle panels: MRS → HISTORY → LIVE → SETTINGS (amber border = focused)"},
 		{"↑↓ / j k", "move / scroll within the focused panel"},
 		{"enter", "details: MR info + clashes, or a run's phase timeline"},
 		{"o", "open the selected MR/PR in the browser"},
@@ -1719,7 +1710,6 @@ func (m model) helpView() string {
 		{"c", "chat with the resolver about an escalated MR (⚑ rows) — in place"},
 		{"R", "retry the selected MR (clears tried/deferred marks, ticks)"},
 		{"l", "fixer/AI log panel for the selected MR"},
-		{"s", "settings: budget / delivery / model (↑↓ pick, ←→ change, esc done)"},
 		{"1 / 2 / 3", "screens: dashboard / insights (runs, spend, hotspots) / fleet"},
 		{"r / p", "force a tick / pause the daemon"},
 		{"esc", "close things: settings, screens, log, expanded rows, live scroll"},
