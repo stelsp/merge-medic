@@ -606,7 +606,7 @@ func (m model) mrsRadar(aw int) []string {
 }
 
 func (m model) renderBanner() string {
-	// the name types itself in a loop, with a blinking block cursor
+	// one line: a tiny wrench at work (sparks fly) + the name typing itself
 	const name = "merge-medic"
 	cycle := len(name) + 8 // typing + hold with the full name
 	k := m.frame % cycle
@@ -617,8 +617,9 @@ func (m model) renderBanner() string {
 	if m.frame%2 == 1 {
 		cur = " "
 	}
-	return " ▄█▄\n" +
-		" ▀█▀    " + bold.Render(name[:k]) + cur + "\n"
+	sparks := []string{" ", "·", "✦", "·"}
+	spark := amber.Render(sparks[m.frame%len(sparks)])
+	return " 🔧" + spark + " " + bold.Render(name[:k]) + cur + "\n"
 }
 
 func (m model) View() string {
