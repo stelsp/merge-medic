@@ -34,10 +34,10 @@ YLW=$(tput setaf 3 2>/dev/null || true); DIM=$(tput dim 2>/dev/null || true)
 latest_ai_log() { ls -t "$ROOT"/logs/ai-*.log 2>/dev/null | head -1; }
 
 # phase → [base pct, next pct, avg duration s] for the interpolated bar
-phase_base() { case "$1" in START) echo 3;; WORKTREE) echo 10;; MERGE) echo 25;; MERGE_CLEAN|AI_RESOLVE) echo 45;; VERIFY) echo 70;; TESTS) echo 80;; REGRESSION) echo 88;; PUSH) echo 95;; DONE|FAIL|ESCALATED) echo 100;; *) echo 0;; esac; }
-phase_next() { case "$1" in START) echo 10;; WORKTREE) echo 25;; MERGE) echo 45;; MERGE_CLEAN|AI_RESOLVE) echo 70;; VERIFY) echo 80;; TESTS) echo 88;; REGRESSION) echo 95;; PUSH) echo 99;; *) echo 100;; esac; }
-phase_avg()  { case "$1" in START) echo 3;; WORKTREE) echo 5;; MERGE) echo 10;; MERGE_CLEAN) echo 2;; AI_RESOLVE) echo 90;; VERIFY) echo 150;; TESTS) echo 60;; REGRESSION) echo 180;; PUSH) echo 5;; *) echo 1;; esac; }
-is_terminal() { case "$1" in DONE|FAIL|ESCALATED) return 0;; *) return 1;; esac; }
+phase_base() { case "$1" in START) echo 3;; WORKTREE) echo 10;; MERGE) echo 25;; MERGE_CLEAN|AI_RESOLVE|PLAN) echo 45;; VERIFY) echo 70;; TESTS) echo 80;; REGRESSION) echo 88;; PUSH) echo 95;; DONE|FAIL|ESCALATED|PLANNED) echo 100;; *) echo 0;; esac; }
+phase_next() { case "$1" in START) echo 10;; WORKTREE) echo 25;; MERGE) echo 45;; MERGE_CLEAN|AI_RESOLVE|PLAN) echo 70;; VERIFY) echo 80;; TESTS) echo 88;; REGRESSION) echo 95;; PUSH) echo 99;; *) echo 100;; esac; }
+phase_avg()  { case "$1" in START) echo 3;; WORKTREE) echo 5;; MERGE) echo 10;; MERGE_CLEAN) echo 2;; AI_RESOLVE) echo 90;; PLAN) echo 60;; VERIFY) echo 150;; TESTS) echo 60;; REGRESSION) echo 180;; PUSH) echo 5;; *) echo 1;; esac; }
+is_terminal() { case "$1" in DONE|FAIL|ESCALATED|PLANNED) return 0;; *) return 1;; esac; }
 
 # interpolate percent within the current phase by elapsed time vs its average
 phase_pct() { # $1=phase $2=seconds spent in this phase
@@ -132,19 +132,18 @@ case "$cmd" in
       nfix="$(pgrep -f "$ROOT/fix-mr.sh" 2>/dev/null | wc -l | tr -d ' ')" || nfix=0
       daemon_loaded && d="${GRN}on${N}" || d="${RED}off${N}"
 
-      # today's counters from the phase logs
-      ok=0; bad=0; esc=0; clean=0; ai=0
-      for p in "$ROOT"/state/progress-*.log; do
-        [ -e "$p" ] || continue
-        while IFS='|' read -r ets ephase _; do
-          [ "${ets:-0}" -lt "$day0" ] && continue
-          case "$ephase" in
-            DONE) ok=$((ok+1));; FAIL) bad=$((bad+1));; ESCALATED) esc=$((esc+1));;
-            MERGE_CLEAN) clean=$((clean+1));; AI_RESOLVE) ai=$((ai+1));;
+      # counters from the durable ledger (state/history.log): today + all-time
+      ok=0; bad=0; esc=0; tok=0; tbad=0; tesc=0; tclean=0; tai=0
+      if [ -f "$ROOT/state/history.log" ]; then
+        while IFS='|' read -r ets _ outcome mode; do
+          case "$outcome" in
+            DONE) tok=$((tok+1)); [ "$mode" = "clean" ] && tclean=$((tclean+1)); [ "$mode" = "ai" ] && tai=$((tai+1)); [ "${ets:-0}" -ge "$day0" ] && ok=$((ok+1)) ;;
+            FAIL) tbad=$((tbad+1)); [ "${ets:-0}" -ge "$day0" ] && bad=$((bad+1)) ;;
+            ESCALATED) tesc=$((tesc+1)); [ "${ets:-0}" -ge "$day0" ] && esc=$((esc+1)) ;;
           esac
-        done < "$p"
-      done
-      out+="  daemon $d · AI budget $spent/${DAILY_AGENT_RUNS:-?} · active: $nfix · today: ${GRN}$ok fixed${N} / ${RED}$bad failed${N} / ${YLW}$esc→human${N} · $clean clean, $ai AI\n\n"
+        done < "$ROOT/state/history.log"
+      fi
+      out+="  daemon $d · AI budget $spent/${DAILY_AGENT_RUNS:-?} · active: $nfix · today ${GRN}$ok✓${N} ${RED}$bad✗${N} ${YLW}$esc⚑${N} · total ${GRN}$tok✓${N} ${RED}$tbad✗${N} ${YLW}$tesc⚑${N} ($tclean clean, $tai AI)\n\n"
 
       shown=0; newest_log=""
       for p in "$ROOT"/state/progress-*.log; do
@@ -154,13 +153,13 @@ case "$cmd" in
         ts="${lastline%%|*}"; rest="${lastline#*|}"; phase="${rest%%|*}"; detail="${rest#*|}"
         t0line="$(head -1 "$p")"; t0="${t0line%%|*}"
         active=1; is_terminal "$phase" && active=0
-        # hide DONE/FAIL older than 2 hours
-        [ "$active" = "0" ] && [ $(( now - ts )) -gt 7200 ] && continue
+        # hide DONE/FAIL older than 2 hours; PLANNED stays until approved
+        if [ "$active" = "0" ] && [ "$phase" != "PLANNED" ] && [ $(( now - ts )) -gt 7200 ]; then continue; fi
         inphase=$(( now - ${ts:-0} )); [ "$active" = "0" ] && inphase=0
         pct="$(phase_pct "$phase" "$inphase")"
         el=$(( ${ts:-0} - ${t0:-0} )); [ "$active" = "1" ] && el=$(( now - t0 ))
         case "$phase" in
-          DONE) c="$GRN";; FAIL) c="$RED";; AI_RESOLVE|ESCALATED) c="$YLW";; *) c="";;
+          DONE) c="$GRN";; FAIL) c="$RED";; AI_RESOLVE|PLAN|PLANNED|ESCALATED) c="$YLW";; *) c="";;
         esac
         mark=' '; [ "$active" = "1" ] && { mark="$sp"; newest_log="$iid"; }
         printf -v line "  %s ${B}!%-4s${N} [%s] %3d%%  ${c}%-11s${N} %3dm%02ds  ${DIM}%s${N}" \
@@ -197,16 +196,28 @@ case "$cmd" in
         fi
       fi
 
-      out+="\n  ${DIM}q quit · l log panel · r run tick · p pause/resume · WORKTREE→MERGE→AI|CLEAN→VERIFY→TESTS→REGRESSION→PUSH→DONE|ESCALATED${N}\n"
+      out+="\n  ${DIM}q quit · l log · r tick · p pause · a approve PLANNED · MERGE→AI|CLEAN|PLAN→VERIFY→TESTS→REGRESSION→PUSH→DONE|PLANNED|ESCALATED${N}\n"
       if [ "${2:-}" = "--once" ]; then printf "%b" "$out"; exit 0; fi
       printf '\033[H\033[2J'
       printf "%b" "$out"
       read -r -t 1 -n 1 key 2>/dev/null || true
       case "${key:-}" in
-        q) tput cnorm 2>/dev/null; exit 0 ;;
-        l) LOGP=$((1 - LOGP)) ;;
-        r) nohup bash "$ROOT/watch.sh" >/dev/null 2>&1 & ;;
-        p) if daemon_loaded; then "$0" pause >/dev/null; else "$0" resume >/dev/null; fi ;;
+        q|й) tput cnorm 2>/dev/null; exit 0 ;;
+        l|д) LOGP=$((1 - LOGP)) ;;
+        r|к) nohup bash "$ROOT/watch.sh" >/dev/null 2>&1 & ;;
+        p|з) if daemon_loaded; then "$0" pause >/dev/null; else "$0" resume >/dev/null; fi ;;
+        a|ф)
+          # approve the first PLANNED fixer: next tick re-runs it for real
+          for pp in "$ROOT"/state/progress-*.log; do
+            [ -e "$pp" ] || continue
+            if tail -1 "$pp" | grep -q '|PLANNED|'; then
+              aiid="${pp##*progress-}"; aiid="${aiid%.log}"
+              rm -f "$ROOT/state/tried-$aiid" "$ROOT/state/dry-$aiid"
+              touch "$ROOT/state/approve-$aiid"
+              nohup bash "$ROOT/watch.sh" >/dev/null 2>&1 &
+              break
+            fi
+          done ;;
       esac
     done
     ;;

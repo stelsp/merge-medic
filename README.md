@@ -63,6 +63,14 @@ When guessing would be dangerous, the bot **doesn't**: conflicts under
 per-file reasoning — or the escalation reason — is posted to the MR, so the
 reviewer always sees what the bot did and why.
 
+**Semi-auto for sensitive branches.** Only `AUTO_BRANCHES` sources (default
+`feat-*`) are fixed hands-off. A conflicted MR from any other source — e.g. a
+release MR `dev → main` — gets a read-only **resolution plan** posted as an MR
+comment instead of a fix. A human reviews it, optionally leaves correcting
+comments right on the MR, and presses `a` in the dashboard; the approved run
+executes the plan with those comments as overriding instructions. The bot
+never pushes to a non-auto branch without that approve.
+
 ## How it stays cheap and safe
 
 | Guard | What it does |
@@ -133,6 +141,7 @@ Everything lives in `config.env` (gitignored; seeded from
 | `TEST_CMD_TEMPLATE` | focused tests, `{files}` = conflicted paths |
 | `REGRESSION_CMD` / `REGRESSION_WHEN` | full suite gate: `ai` (default) / `always` / `never` |
 | `RESOLVE_POLICY_FILE` | project-specific resolution rules appended to the prompt |
+| `AUTO_BRANCHES` | source-branch globs fixed fully automatically (default `feat-*`); any other source gets the semi-auto flow: plan → MR comment → human approve (`a` in the dashboard) → fix that reads your comments |
 | `ESCALATE_PATTERNS` | glob paths the bot must never resolve |
 | `POST_RESOLUTION_NOTE` | `1` = comment the resolver's reasoning on the MR/PR |
 | `EXCLUDE_BRANCHES` | branches to ignore (your active work) |

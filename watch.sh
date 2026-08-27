@@ -79,12 +79,24 @@ consider() {
   local ex
   for ex in $EXCLUDE_BRANCHES; do [ "$src" = "$ex" ] && return 0; done
 
+  # routing: AUTO_BRANCHES sources are fixed fully automatically; everything
+  # else runs the semi-auto plan -> human approve -> fix flow
+  local mode="plan" ab
+  for ab in ${AUTO_BRANCHES:-feat-*}; do
+    # shellcheck disable=SC2254
+    case "$src" in $ab) mode="auto";; esac
+  done
+  if [ "$mode" = "plan" ] && [ -f "$STATE/approve-$iid" ]; then
+    mode="fix-approved"
+    rm -f "$STATE/approve-$iid"
+  fi
+
   # this exact commit pair was already tried and failed — don't burn tokens again
   if [ -f "$STATE/$MARK-$iid" ] && [ "$(cat "$STATE/$MARK-$iid")" = "$ssha:$tsha" ]; then
     return 0
   fi
 
-  targets+="$iid	$src	$tgt	$title
+  targets+="$iid	$src	$tgt	$mode	$title
 "
 }
 
@@ -161,8 +173,8 @@ fi
 # herestring (not a pipe): $( ) strips the final \n and `read` would lose the
 # last record — and with it the "already tried" mark, i.e. an eternal retry.
 targets="$(printf '%s' "$targets" | head -n "$MAX_MRS_PER_RUN")"
-while IFS=$'\t' read -r iid src tgt _; do
-  [ -n "$iid" ] && log "  -> !$iid  $src -> $tgt"
+while IFS=$'\t' read -r iid src tgt mode _; do
+  [ -n "$iid" ] && log "  -> $SIGIL$iid  $src -> $tgt  [$mode]"
 done <<<"$targets"
 
 if [ "$DRY_RUN" = "1" ]; then
@@ -196,11 +208,11 @@ running_fixers() { pgrep -f "$ROOT/fix-mr.sh" 2>/dev/null | wc -l | tr -d ' '; }
 
 notify "Conflicts: $count MR(s)" "Launching fixers (mrwatch top for progress)"
 launched=0
-while IFS=$'\t' read -r iid src tgt title; do
+while IFS=$'\t' read -r iid src tgt mode title; do
   [ -z "$iid" ] && continue
   while [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; do sleep 5; done
-  log "  fixer -> $SIGIL$iid  ($src -> $tgt); log: fixer-$iid.log"
-  nohup bash "$ROOT/fix-mr.sh" "$iid" "$src" "$tgt" "$title" >> "$LOGDIR/fixer-$iid.log" 2>&1 &
+  log "  fixer -> $SIGIL$iid  ($src -> $tgt) [$mode]; log: fixer-$iid.log"
+  nohup bash "$ROOT/fix-mr.sh" "$iid" "$src" "$tgt" "$title" "$mode" >> "$LOGDIR/fixer-$iid.log" 2>&1 &
   launched=$((launched + 1))
   sleep 1
 done <<<"$targets"
