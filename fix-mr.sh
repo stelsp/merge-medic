@@ -129,10 +129,10 @@ cd "$WATCH_REPO"
 git fetch --prune --quiet origin || fail "git fetch failed"
 
 # ── defer while humans / other agent sessions are still working ───────────────
-# Retry happens naturally: watch.sh skips this MR until the deferred marker
-# ages past QUIET_MINUTES, then clears it together with the tried marker.
+# watch.sh retries a deferred MR on every tick; this check is cheap (fetch +
+# git log, no AI), so the fix lands one tick after the branch goes quiet.
 defer() {
-  ev DEFERRED "$1 — retry in ~${QUIET_MINUTES:-15}m"
+  ev DEFERRED "$1 — retrying every tick until quiet for ${QUIET_MINUTES:-5}m"
   date +%s > "$ROOT/state/deferred-$IID"
   cleanup_wt
   exit 0
