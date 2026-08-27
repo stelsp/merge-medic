@@ -113,6 +113,7 @@ gitignored.
 ```
 mrwatch             status: daemon, mode, budget, fixers, MR states
 mrwatch top         live dashboard (q quits)
+mrwatch live        merged real-time event stream — run it in a second terminal
 mrwatch mrs         live mergeability of all open MRs
 mrwatch log -f      follow the watcher log
 mrwatch agent <iid> AI resolver log for one MR

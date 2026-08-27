@@ -34,6 +34,9 @@ notify() { mm_notify "$@"; }
 if [ -f "$LOG" ] && [ "$(mm_filesize "$LOG")" -gt 5242880 ]; then
   mv -f "$LOG" "$LOG.1"
 fi
+if [ -f "$LOGDIR/events.log" ] && [ "$(mm_filesize "$LOGDIR/events.log")" -gt 5242880 ]; then
+  mv -f "$LOGDIR/events.log" "$LOGDIR/events.log.1"
+fi
 
 # ── single instance ───────────────────────────────────────────────────────────
 LOCK="$ROOT/.lock"

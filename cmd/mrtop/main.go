@@ -157,30 +157,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.frame++
 		return m, tick()
 	case tea.KeyMsg:
-		// Cyrillic twins: the same physical keys on a Russian layout.
 		switch msg.String() {
-		case "q", "й", "ctrl+c":
+		case "q", "ctrl+c":
 			return m, tea.Quit
-		case "up", "k", "л":
+		case "up", "k":
 			if m.sel > 0 {
 				m.sel--
 			}
-		case "down", "j", "о":
+		case "down", "j":
 			if m.sel < len(m.rows())-1 {
 				m.sel++
 			}
-		case "enter", "e", "у":
+		case "enter", "e":
 			if it, ok := m.selected(); ok {
 				m.expanded[it.key()] = !m.expanded[it.key()]
 			}
-		case "l", "д":
+		case "l":
 			m.showLog = !m.showLog
 			if m.showLog {
 				if it, ok := m.selected(); ok {
 					m.logName, m.logLines = readLog(m.root, it.iid)
 				}
 			}
-		case "a", "ф":
+		case "a":
 			if it, ok := m.selected(); ok && it.phase == "PLANNED" {
 				_ = os.Remove(filepath.Join(m.root, "state", "tried-"+it.iid))
 				_ = os.Remove(filepath.Join(m.root, "state", "dry-"+it.iid))
@@ -190,10 +189,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
 				_ = c.Start()
 			}
-		case "r", "к":
+		case "r":
 			c := exec.Command("bash", filepath.Join(m.root, "watch.sh"))
 			_ = c.Start()
-		case "p", "з":
+		case "p":
 			go togglePause(m.root)
 		}
 	}
