@@ -414,10 +414,15 @@ func (m model) View() string {
 		w1 := m.width / 3
 		w2 := m.width / 3
 		w3 := m.width - w1 - w2
+		// same height for all three boxes — mixed heights look ragged
+		h := max(len(statusLines), max(len(runLines), len(spendLines))) + 1
+		boxH := func(w int, title, body string) string {
+			return section.Width(w - 2).Height(h).Render(sectionTitle.Render(title) + "\n" + body)
+		}
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top,
-			box(w1, "STATUS", strings.Join(statusLines, "\n")),
-			box(w2, "RUNS", strings.Join(runLines, "\n")),
-			box(w3, "SPEND", strings.Join(spendLines, "\n"))) + "\n")
+			boxH(w1, "STATUS", strings.Join(statusLines, "\n")),
+			boxH(w2, "RUNS", strings.Join(runLines, "\n")),
+			boxH(w3, "SPEND", strings.Join(spendLines, "\n"))) + "\n")
 	} else {
 		all := append(append(statusLines, runLines...), spendLines...)
 		b.WriteString(box(m.width, "STATUS", strings.Join(all, "\n")) + "\n")
@@ -459,10 +464,12 @@ func (m model) View() string {
 			if fixing[mr.iid] {
 				gear = blue.Render("⚙ ")
 			}
+			// fixed-width branch column so titles line up
+			bcol := min(26, aw/3)
 			act = append(act, fmt.Sprintf(" %s %s %s%s %s", ic,
 				bold.Render(fmt.Sprintf("!%-4s", mr.iid)), gear,
-				st.Render(trunc(ref, 26)),
-				dim.Render(trunc(mr.title, aw-(12+min(26, len([]rune(ref))))))))
+				st.Render(fmt.Sprintf("%-*s", bcol, trunc(ref, bcol))),
+				dim.Render(trunc(mr.title, aw-(13+bcol)))))
 		}
 	}
 	if len(act) == 0 {
