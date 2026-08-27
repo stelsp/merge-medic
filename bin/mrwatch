@@ -249,6 +249,7 @@ case "$cmd" in
     iid="${2:?usage: mrwatch chat <iid>}"
     BRIEF="$ROOT/state/esc-$iid.md"
     ANS="$ROOT/state/answers-$iid.md"
+    mkdir -p "$ROOT/state"
     if [ ! -f "$BRIEF" ]; then
       # path-pattern escalations carry no AI brief — synthesize one from the
       # recorded escalation reason so the chat works for every escalation
