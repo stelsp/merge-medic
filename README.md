@@ -95,9 +95,13 @@ escalated.
 ## Install
 
 Requirements: macOS (launchd), Linux (systemd user timer) or Windows via
-WSL2 (see below), `jq`, `git`, [Claude Code CLI](https://code.claude.com),
-and your forge CLI — [`glab`](https://gitlab.com/gitlab-org/cli) for GitLab
-(default) or [`gh`](https://cli.github.com) for GitHub.
+WSL2 (see below), `jq`, `git`, your forge CLI —
+[`glab`](https://gitlab.com/gitlab-org/cli) for GitLab (default) or
+[`gh`](https://cli.github.com) for GitHub — and a resolver agent:
+[Claude Code CLI](https://code.claude.com) by default, or
+[aider](https://aider.chat) to use **any model** (OpenAI / Gemini / DeepSeek /
+OpenRouter / local Ollama — bring your API key), or your own command
+(`RESOLVER=custom`).
 
 ```bash
 git clone https://github.com/stelsp/merge-medic && cd merge-medic
@@ -165,6 +169,7 @@ Everything lives in `config.env` (gitignored; seeded from
 | `VERIFY_CMD` | build/typecheck gate before push |
 | `TEST_CMD_TEMPLATE` | focused tests, `{files}` = conflicted paths |
 | `REGRESSION_CMD` / `REGRESSION_WHEN` | full suite gate: `ai` (default) / `always` / `never` |
+| `RESOLVER` | `claude` (default) / `aider` (any model via API keys: `RESOLVER_MODEL`) / `custom` (`RESOLVER_CMD`) |
 | `RESOLVE_POLICY_FILE` | project-specific resolution rules appended to the prompt |
 | `AUTO_BRANCHES` | source-branch globs fixed fully automatically (default `feat-*`); any other source gets the semi-auto flow: plan → MR comment → human approve (`a` in the dashboard) → fix that reads your comments |
 | `ESCALATE_PATTERNS` | glob paths the bot must never resolve |

@@ -23,15 +23,18 @@ fi
 PROVIDER="$(sed -n 's/^PROVIDER=["'\'']\{0,1\}\([a-z]*\).*/\1/p' "$ROOT/config.env" | head -1)"
 PROVIDER="${PROVIDER:-gitlab}"
 FORGE_CLI="glab"; [ "$PROVIDER" = "github" ] && FORGE_CLI="gh"
-echo "  provider: $PROVIDER (forge CLI: $FORGE_CLI)"
+RESOLVER="$(sed -n 's/^RESOLVER=["'\'']\{0,1\}\([a-z]*\).*/\1/p' "$ROOT/config.env" | head -1)"
+RESOLVER="${RESOLVER:-claude}"
+RESOLVER_DEP="$RESOLVER"; [ "$RESOLVER" = "custom" ] && RESOLVER_DEP=""
+echo "  provider: $PROVIDER (forge CLI: $FORGE_CLI) · resolver: $RESOLVER"
 
 missing=0
-for dep in "$FORGE_CLI" jq git claude; do
+for dep in "$FORGE_CLI" jq git $RESOLVER_DEP; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     echo "  MISSING: $dep"; missing=1
   fi
 done
-[ "$missing" = "1" ] && { echo "install the missing tools first (glab: https://gitlab.com/gitlab-org/cli; gh: https://cli.github.com; claude: https://code.claude.com)"; exit 1; }
+[ "$missing" = "1" ] && { echo "install the missing tools first (glab: https://gitlab.com/gitlab-org/cli; gh: https://cli.github.com; claude: https://code.claude.com; aider: https://aider.chat)"; exit 1; }
 if ! "$FORGE_CLI" auth status >/dev/null 2>&1; then
   echo "  WARN: $FORGE_CLI is not authenticated — run: $FORGE_CLI auth login"
   echo "        (the watcher cannot list MRs/PRs until you do)"

@@ -97,6 +97,63 @@ record_tokens() { # $1 = claude --output-format json result file
   ' "$1" >> "$ROOT/state/tokens.log" 2>/dev/null || true
 }
 
+# ── resolver abstraction: claude (default) | aider | custom ───────────────────
+# resolver_call <plan|resolve> <prompt> <errlog>
+# Runs the configured agent in the current worktree. Prints the agent's final
+# answer text to stdout, returns its exit code. "plan" must not edit files.
+# Token/cost accounting only where the provider reports it (claude).
+resolver_call() {
+  local mode="$1" prompt="$2" errlog="$3" rc=0 out
+  case "${RESOLVER:-claude}" in
+    claude)
+      local tools dtools
+      if [ "$mode" = "plan" ]; then
+        tools="Read Grep Glob Bash(git:*)"
+        dtools="Edit Write WebFetch WebSearch Bash(curl:*) Bash(rm:*)"
+      else
+        tools="Read Edit Write Glob Grep Bash(git:*)"
+        dtools="WebFetch WebSearch Bash(curl:*) Bash(rm:*) Bash(git push:*)"
+      fi
+      out="$(mktemp)"
+      claude -p "$prompt" \
+        --model "${CLAUDE_MODEL:-opus}" \
+        --permission-mode acceptEdits \
+        --allowedTools "$tools" \
+        --disallowedTools "$dtools" \
+        --add-dir "$WT" \
+        --output-format json > "$out" 2>>"$errlog" || rc=$?
+      jq -r '.result // empty' "$out" 2>/dev/null || true
+      record_tokens "$out"
+      rm -f "$out"
+      ;;
+    aider)
+      # Any model aider supports (OpenAI/Gemini/DeepSeek/OpenRouter/Ollama...).
+      # API keys come from config.env (export them there) or the environment.
+      # --dry-run keeps the plan phase read-only; we commit ourselves.
+      local dry=""
+      [ "$mode" = "plan" ] && dry="--dry-run"
+      # shellcheck disable=SC2086
+      printf '%s' "$prompt" | aider $dry --yes-always --no-auto-commits \
+        ${RESOLVER_MODEL:+--model "$RESOLVER_MODEL"} \
+        --message-file /dev/stdin 2>>"$errlog" || rc=$?
+      ;;
+    custom)
+      # RESOLVER_CMD with {prompt_file} and {mode} substituted. The command
+      # runs in the worktree, must edit files itself and exit 0 on success.
+      [ -n "${RESOLVER_CMD:-}" ] || { echo "RESOLVER=custom but RESOLVER_CMD is empty" >>"$errlog"; return 78; }
+      local pf cmd
+      pf="$(mktemp)"; printf '%s' "$prompt" > "$pf"
+      cmd="${RESOLVER_CMD//\{prompt_file\}/$pf}"
+      cmd="${cmd//\{mode\}/$mode}"
+      ( eval "$cmd" ) 2>>"$errlog" || rc=$?
+      rm -f "$pf"
+      ;;
+    *)
+      echo "unknown RESOLVER '$RESOLVER'" >>"$errlog"; return 78 ;;
+  esac
+  return $rc
+}
+
 # Human MR/PR comments newer than the plan file — corrections for the
 # approved run. Bot-authored comments (merge-medic prefix) are skipped.
 collect_feedback() { # $1 = plan file; its mtime is the cutoff
@@ -237,7 +294,7 @@ else
     ev PLAN "$n file(s): $(printf '%s' "$conflicts" | tr '\n' ' ' | cut -c1-120)"
     PLANFILE="$ROOT/state/plan-$IID.md"
     set +e
-    claude -p "A merge of origin/$TGT into $SRC (${SIGIL}$IID${TITLE:+ — \"$TITLE\"}) has conflicts. You are in the worktree mid-merge with zdiff3 markers (||||||| shows the common ancestor). Do NOT edit anything — read the conflicted files and write a RESOLUTION PLAN as your answer.
+    resolver_call plan "A merge of origin/$TGT into $SRC (${SIGIL}$IID${TITLE:+ — \"$TITLE\"}) has conflicts. You are in the worktree mid-merge with zdiff3 markers (||||||| shows the common ancestor). Do NOT edit anything — read the conflicted files and write a RESOLUTION PLAN as your answer.
 
 Conflicting files:
 $conflicts
@@ -249,20 +306,12 @@ What the target branch ($TGT) did to these files:
 ${tgt_hist:-<no commits found>}
 
 Write GitHub-flavored markdown, no preamble: a '### <file path>' heading per file with bullets '**source changed:** …', '**target changed:** …', '**proposed resolution:** …', '**risk:** …'. Be specific enough that a reviewer can approve or correct it in a comment. End with an '#### Overall risk' section.$policy" \
-      --model "${CLAUDE_MODEL:-opus}" \
-      --permission-mode acceptEdits \
-      --allowedTools "Read Grep Glob Bash(git:*)" \
-      --disallowedTools "Edit Write WebFetch WebSearch Bash(curl:*) Bash(rm:*)" \
-      --add-dir "$WT" \
-      --output-format json > "$PLANFILE.json" 2>>"$LOGDIR/fixer-$IID.log"
+      "$LOGDIR/fixer-$IID.log" > "$PLANFILE"
     prc=$?
     set -e
     git merge --abort 2>/dev/null || true
     [ "$prc" != "0" ] && fail "plan agent exited with code $prc"
-    jq -r '.result // empty' "$PLANFILE.json" > "$PLANFILE" 2>/dev/null || true
     [ -s "$PLANFILE" ] || fail "plan agent returned no text"
-    record_tokens "$PLANFILE.json"
-    rm -f "$PLANFILE.json"
     ev PLANNED "awaiting approve (a) — plan posted to ${SIGIL}$IID"
     ledger PLANNED
     post_note "## 🩹 merge-medic — resolution plan (approval required)
@@ -290,7 +339,7 @@ $(cat "$PLANFILE")"
   ev AI_RESOLVE "$n file(s): $(printf '%s' "$conflicts" | tr '\n' ' ' | cut -c1-120)"
   AILOG="$LOGDIR/ai-$IID-$(date '+%Y%m%d-%H%M%S').log"
   set +e
-  claude -p "You are resolving git merge conflicts in a worktree (branch $SRC, origin/$TGT merged in, ${SIGIL}$IID${TITLE:+ — \"$TITLE\"}).
+  resolver_call resolve "You are resolving git merge conflicts in a worktree (branch $SRC, origin/$TGT merged in, ${SIGIL}$IID${TITLE:+ — \"$TITLE\"}).
 
 Conflict markers use zdiff3 style: between <<<<<<< and >>>>>>> you also see the
 common-ancestor version (||||||| block) — use it to understand what EACH side
@@ -316,24 +365,18 @@ Rules:
 - Write a summary into a file named $SUMFILE in the repo root, as
   GitHub-flavored markdown: a '### <file path>' heading per file with bullets
   '**source:** …', '**target:** …', '**kept:** …'. No preamble.$approved_ctx$policy" \
-    --model "${CLAUDE_MODEL:-opus}" \
-    --permission-mode acceptEdits \
-    --allowedTools "Read Edit Write Glob Grep Bash(git:*)" \
-    --disallowedTools "WebFetch WebSearch Bash(curl:*) Bash(rm:*) Bash(git push:*)" \
-    --add-dir "$WT" \
-    --output-format json > "$AILOG.json" 2>>"$AILOG"
+    "$AILOG" > "$AILOG.ans"
   rc=$?
   set -e
-  # keep the human-readable resolver answer in AILOG, usage in tokens.log
-  jq -r '.result // empty' "$AILOG.json" >> "$AILOG" 2>/dev/null || true
-  record_tokens "$AILOG.json"
-  rm -f "$AILOG.json"
+  # keep the human-readable resolver answer at the end of AILOG
+  cat "$AILOG.ans" >> "$AILOG" 2>/dev/null || true
+  rm -f "$AILOG.ans"
   if [ -f "$ESCFILE" ]; then
     reason="$(head -3 "$ESCFILE" | tr '\n' ' ')"
     git merge --abort 2>/dev/null || true
     escalate "AI declined to guess: ${reason:-incompatible changes}"
   fi
-  [ "$rc" != "0" ] && fail "claude exited with code $rc (log: ${AILOG##*/})"
+  [ "$rc" != "0" ] && fail "resolver exited with code $rc (log: ${AILOG##*/})"
   [ -n "$(git diff --name-only --diff-filter=U)" ] && fail "unresolved files remain"
   # shellcheck disable=SC2086
   if grep -rl '^<<<<<<< ' $conflicts 2>/dev/null | head -1 | grep -q .; then
