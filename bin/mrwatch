@@ -289,18 +289,11 @@ $(cat "$BRIEF")"         --model "${CLAUDE_MODEL:-sonnet}"         --add-dir "$R
     if [ ! -s "$ANS" ]; then
       echo "no answers recorded — nothing changes"; rm -f "$ANS"; exit 0
     fi
-    echo "${GRN}answers ready${N} → state/answers-$iid.md"
-    read -rp "continue the fix now with these answers? [Y/n] " a
-    case "$a" in
-      n|N) echo "ok — approve later from the dashboard (a) or: touch state/approve-$iid && mrwatch run" ;;
-      *)
-        rm -f "$ROOT/state/tried-$iid" "$ROOT/state/dry-$iid" "$ROOT/state/deferred-$iid"
-        touch "$ROOT/state/approve-$iid"
-        echo "running a tick…"
-        bash "$ROOT/watch.sh" >/dev/null 2>&1 &
-        echo "${GRN}re-run started${N} — watch it: $(basename "$0") "
-        ;;
-    esac
+    # answers exist = the decision was made in the chat — resume immediately
+    rm -f "$ROOT/state/tried-$iid" "$ROOT/state/dry-$iid" "$ROOT/state/deferred-$iid"
+    touch "$ROOT/state/approve-$iid"
+    bash "$ROOT/watch.sh" >/dev/null 2>&1 &
+    echo "${GRN}answers saved — the fix is resuming${N}"
     ;;
 
   setup)
