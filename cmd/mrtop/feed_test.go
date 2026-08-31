@@ -172,3 +172,53 @@ func TestBuildFeedSurvivesMissingLogs(t *testing.T) {
 		t.Errorf("empty instance produced %d lines", len(feed))
 	}
 }
+
+func TestStripANSIHardCases(t *testing.T) {
+	cases := map[string]string{
+		"\x1b[31mred\x1b[0m":       "red",
+		"\x1b[?25lhidden":          "hidden", // private CSI, from spinners
+		"\x1b[38:2::255:0:0mtruec": "truec",  // colon-separated true color
+		"x\x1b]0;my title\x07y":    "xy",     // OSC + BEL terminator
+		"x\x1b]0;t\x1b\\y":         "xy",     // OSC + ST terminator
+		"\x1b(Bplain":              "plain",  // two-byte escape
+		"bell\a":                   "bell",   // a stray BEL beeps every repaint
+		"trunc\x1b[31":             "trunc",  // escape cut at end of string
+		"lone\x1b":                 "lone",
+		"plain text":               "plain text",
+		"кириллица\x1b[0m цела":    "кириллица цела",
+	}
+	for in, want := range cases {
+		if got := stripANSI(in); got != want {
+			t.Errorf("stripANSI(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestParseEventLineDropsPartialRune(t *testing.T) {
+	// the shell caps details by BYTES, so the last rune can arrive halved
+	r, _ := parseEventLine("1700000000|42|VERIFY|red · \xd1", 0)
+	if !utf8ValidString(r.det) {
+		t.Errorf("invalid UTF-8 reached the UI: %q", r.det)
+	}
+}
+
+func TestParseWatchLineIDWithoutDetail(t *testing.T) {
+	r, ok := parseWatchLine("2026-08-31 14:02:11  CLEARED !42", 0)
+	if !ok || r.iid != "42" || r.det != "" {
+		t.Errorf("bare channel+id parsed as iid=%q det=%q", r.iid, r.det)
+	}
+}
+
+func TestRenderFeedRowKeepsForgeSigil(t *testing.T) {
+	r, _ := parseWatchLine("2026-08-31 14:02:11  SKIP #10 excluded", 0)
+	if got := renderFeedRow(r, false); !strings.Contains(got, "#10") {
+		t.Errorf("GitHub PR rendered with the wrong sigil: %q", got)
+	}
+}
+
+func TestRenderFeedRowKeepsLongestPhase(t *testing.T) {
+	r, _ := parseEventLine("1700000000|8|MERGE_CLEAN|no conflicts", 0)
+	if got := renderFeedRow(r, false); !strings.Contains(got, "MERGE_CLEAN") {
+		t.Errorf("longest phase got clipped: %q", got)
+	}
+}

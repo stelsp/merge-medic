@@ -61,7 +61,7 @@ mm_src_is_auto() {
 # evict real events from the dashboard's fixed-size log tail.
 mm_clean() {
   LC_ALL=C sed $'s/\033\[[0-9;]*[a-zA-Z]//g' \
-    | tr -d '\000-\010\013\014\016-\037' \
+    | tr -d '\000-\010\013-\037' \
     | tr '\n' ' ' | cut -c1-160
 }
 

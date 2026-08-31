@@ -77,12 +77,25 @@ verbose=0
 # intervals and would evict real events from the dashboard's log tail)
 SK_DEDUP=0; SK_DRAFT=0; SK_EXCL=0; SK_INCL=0; SK_DEFER=0
 
+# notify_once fires a desktop notification only when the situation changes.
+# A broken token or an exhausted budget persists for hours: without this the
+# watcher would notify on every tick (480/day at the default interval).
+notify_once() { # kind key title body
+  local f="$STATE/notified-$1"
+  if [ "$(cat "$f" 2>/dev/null || echo '')" = "$2" ]; then return 0; fi
+  printf '%s' "$2" > "$f"
+  notify "$3" "$4"
+}
+
 # skip_once logs why an MR was passed over — but only when the reason (or its
 # key, e.g. the sha pair) changed since last tick. Repeating it every tick
 # would bury real events in the dashboard's fixed-size log tail.
 skip_once() { # iid key detail
   local f="$STATE/skip-$1"
-  [ "$(cat "$f" 2>/dev/null || echo '')" = "$2" ] && return 0
+  if [ "$(cat "$f" 2>/dev/null || echo '')" = "$2" ]; then
+    touch "$f"   # still true: keep it out of reach of the weekly sweep
+    return 0
+  fi
   printf '%s' "$2" > "$f"
   logc SKIP "$1" "$3"
   verbose=1
@@ -99,8 +112,12 @@ consider() {
   echo "$status $ssha:$tsha $src $tgt $ci $author $upd $title" > "$seen_file"
 
   # edge: state change worth logging + notifying
-  if [ "$status" != "conflict" ] && [ "$prev_status" = "conflict" ]; then
-    logc CLEARED "$iid" "conflict gone ($prev_status) · $src -> $tgt"; verbose=1
+  # only a definite "mergeable" closes a conflict: GitHub answers UNKNOWN
+  # while it recomputes after a push, and a failed detail call falls back to
+  # "unknown" — reporting either as resolved would be a lie the next tick
+  # immediately contradicts
+  if [ "$status" = "mergeable" ] && [ "$prev_status" = "conflict" ]; then
+    logc CLEARED "$iid" "conflict resolved · $src -> $tgt"; verbose=1
   fi
 
   [ "$status" != "conflict" ] && return 0
@@ -182,7 +199,7 @@ if mm_is_github; then
         --json number,title,headRefName,baseRefName,mergeable,isDraft,headRefOid,statusCheckRollup,author,updatedAt 2>/dev/null || echo '')"
   if [ -z "$prs" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$prs"; then
     logc ERROR "" "could not list PRs — check: gh auth status"
-    notify "merge-medic: cannot list PRs" "check gh auth status"
+    notify_once forge "prs" "merge-medic: cannot list PRs" "check gh auth status"
     exit 1
   fi
   while IFS= read -r row; do
@@ -216,7 +233,7 @@ else
   mrs="$(glab api "projects/$ENC_PATH/merge_requests?state=opened&per_page=100" 2>/dev/null || echo '')"
   if [ -z "$mrs" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$mrs"; then
     logc ERROR "" "could not list MRs — check: glab auth status / GITLAB_TOKEN"
-    notify "merge-medic: cannot list MRs" "check glab auth status"
+    notify_once forge "mrs" "merge-medic: cannot list MRs" "check glab auth status"
     exit 1
   fi
   # One request covers the whole tick: the list response carries everything
@@ -302,6 +319,8 @@ radar_scan() {
 }
 radar_scan
 
+rm -f "$STATE/notified-forge"   # the forge answered — a later outage may notify
+
 # one line per tick, carrying why nothing (or something) happened
 tick_line() {
   local sk=$((SK_DEDUP + SK_DRAFT + SK_EXCL + SK_INCL + SK_DEFER)) why=""
@@ -332,7 +351,7 @@ logc TICK "" "$(tick_line) — $count to fix · AI budget $spent/$lim_label"
 if [ "$lim" -gt 0 ] && [ "$spent" -ge "$lim" ]; then
   dropped="$(printf '%s' "$targets" | cut -f1 | tr '\n' ' ')"
   logc BUDGET "" "daily AI budget exhausted $spent/$lim — dropping: ${dropped% }"
-  notify "AI budget exhausted ($spent/$lim)" "not fixing: ${dropped% }"
+  notify_once budget "$today:$lim" "AI budget exhausted ($spent/$lim)" "not fixing: ${dropped% }"
   exit 0
 fi
 
@@ -368,7 +387,7 @@ if [ ! -d "$WATCH_REPO/.git" ]; then
 fi
 git -C "$WATCH_REPO" fetch --prune --quiet origin >>"$LOG" 2>&1 || {
   logc ERROR "" "git fetch failed — see the lines above"
-  notify "merge-medic: git fetch failed" "the watcher cannot reach the remote"
+  notify_once forge "fetch" "merge-medic: git fetch failed" "the watcher cannot reach the remote"
   exit 1; }
 
 # ── mark pairs as tried BEFORE launching (no retry loops on crashes) ──────────

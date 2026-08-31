@@ -23,15 +23,16 @@ const (
 
 // feedRow is one parsed rail line before rendering.
 type feedRow struct {
-	ts   int64
-	src  int // 0 watch.log, 1 events.log — sort tiebreak within a second
-	seq  int // arrival order inside its source
-	sev  int
-	iid  string // "" for watcher-global lines
-	ch   string // channel (watcher) or phase (fixer)
-	det  string
-	tick bool // TICK lines render as a rule, not a row
-	done bool // a real completion — only these earn the ✓ glyph
+	ts    int64
+	src   int // 0 watch.log, 1 events.log — sort tiebreak within a second
+	seq   int // arrival order inside its source
+	sev   int
+	iid   string // "" for watcher-global lines
+	sigil string // "!" on GitLab, "#" on GitHub — echoed back verbatim
+	ch    string // channel (watcher) or phase (fixer)
+	det   string
+	tick  bool // TICK lines render as a rule, not a row
+	done  bool // a real completion — only these earn the ✓ glyph
 }
 
 // watcher channels, written by logc() in watch.sh
@@ -123,9 +124,11 @@ func parseWatchLine(ln string, seq int) (feedRow, bool) {
 	row.ch, row.sev, row.tick = head, feedChannels[head], head == "TICK"
 	row.done = head == "CLEARED"
 	// an optional "!42" / "#42" id follows the channel
-	if id, tail, ok := strings.Cut(rest, " "); ok && len(id) > 1 && (id[0] == '!' || id[0] == '#') {
+	// "<sigil><number>", with or without a detail behind it
+	id, tail, _ := strings.Cut(rest, " ")
+	if len(id) > 1 && (id[0] == '!' || id[0] == '#') {
 		if _, err := strconv.Atoi(id[1:]); err == nil {
-			row.iid, rest = id[1:], tail
+			row.iid, row.sigil, rest = id[1:], string(id[0]), tail
 		}
 	}
 	row.det = rest
@@ -145,10 +148,12 @@ func parseEventLine(ln string, seq int) (feedRow, bool) {
 	}
 	row := feedRow{ts: ts, src: 1, seq: seq, ch: parts[2], sev: phaseSeverity(parts[2]), done: parts[2] == "DONE"}
 	if parts[1] != "-" {
-		row.iid = parts[1]
+		row.iid, row.sigil = parts[1], mrSigil
 	}
 	if len(parts) > 3 {
-		row.det = stripANSI(parts[3])
+		// details carry foreign text: strip escapes, and drop any partial
+		// rune left behind by the shell's byte-wise length cap
+		row.det = strings.ToValidUTF8(stripANSI(parts[3]), "")
 	}
 	if strings.HasPrefix(row.det, "ok ·") {
 		row.done = true
@@ -194,15 +199,28 @@ func renderFeedRow(r feedRow, sameAsPrev bool) string {
 	case sameAsPrev:
 		id = dim.Render("  │  ")
 	default:
-		id = padTo(amberB.Render("!"+r.iid), 5)
+		id = padTo(amberB.Render(r.sigilOr()+r.iid), 5)
 	}
 
 	tok := ""
 	if r.ch != "" {
-		tok = tokSt.Render(fmt.Sprintf("%-10s", trunc(r.ch, 10)))
+		// 11 wide: MERGE_CLEAN is the longest phase and must not be clipped
+		tok = tokSt.Render(fmt.Sprintf("%-11s", trunc(r.ch, 11)))
 	}
 	return ts + " " + glyph + " " + id + " " + tok + " " + detSt.Render(r.det)
 }
+
+// sigilOr defaults to the GitLab "!" when a line carried no sigil of its own.
+func (r feedRow) sigilOr() string {
+	if r.sigil != "" {
+		return r.sigil
+	}
+	return "!"
+}
+
+// mrSigil is the reference sigil of the instance being watched; events.log
+// stores bare ids, so the rail has to supply it. Set once per snapshot.
+var mrSigil = "!"
 
 // buildFeed merges both logs into the rail. Both files are read from their
 // tail; each source is capped before the merge so a chatty watcher cannot

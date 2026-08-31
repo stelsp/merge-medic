@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"unicode/utf8"
 )
 
 func mkdir(t *testing.T, root, rel string) {
@@ -26,3 +27,5 @@ func writeFile(t *testing.T, root, rel, content string) {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+func utf8ValidString(s string) bool { return utf8.ValidString(s) }

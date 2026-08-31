@@ -43,11 +43,13 @@ run_gate() {
   local phase="$1" cmd="$2" gs rc=0 tail_out
   ev "$phase" "run · $(printf '%s' "$cmd" | cut -c1-70)"
   gs="$(date +%s)"
-  if ( eval "$cmd" ) >> "$LOGDIR/fixer-$IID.log" 2>&1; then
+  # `|| rc=$?` and NOT `if ...; then`: the status of a failed if-compound is
+  # the if's own (zero), so every red gate would report "exit 0"
+  ( eval "$cmd" ) >> "$LOGDIR/fixer-$IID.log" 2>&1 || rc=$?
+  if [ "$rc" = 0 ]; then
     ev "$phase" "ok · $(( $(date +%s) - gs ))s"
     return 0
   fi
-  rc=$?
   tail_out="$(tail -n 3 "$LOGDIR/fixer-$IID.log" | mm_clean)"
   ev "$phase" "red · exit $rc · $tail_out"
   fail "$phase red (exit $rc, fixer-$IID.log)"
