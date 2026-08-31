@@ -70,7 +70,7 @@ func TestSegBarStableWidth(t *testing.T) {
 
 func TestBoolSwitchWidthAndValue(t *testing.T) {
 	on, off := boolSwitch(true), boolSwitch(false)
-	if !strings.Contains(on, "true") || !strings.Contains(off, "false") {
+	if !strings.Contains(on, "on") || !strings.Contains(off, "off") {
 		t.Errorf("switch must spell the value: %q / %q", on, off)
 	}
 	// both states must be short enough for the narrow STATUS column

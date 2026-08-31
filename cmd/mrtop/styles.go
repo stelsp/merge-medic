@@ -144,14 +144,13 @@ func titleStyled(title string, base lipgloss.Style, budget int) string {
 	return base.Render(trunc(title, budget))
 }
 
-// boolSwitch renders a boolean setting the way it reads in config.env: a
-// checkbox plus the literal value, so the row stays short and the meaning
-// is unambiguous (the STATUS panel has no room for prose).
+// boolSwitch renders a boolean setting as a checkbox plus its state, so the
+// row stays short and unambiguous (the STATUS panel has no room for prose).
 func boolSwitch(on bool) string {
 	if on {
-		return dim.Render("[") + green.Render("x") + dim.Render("] ") + green.Render("true")
+		return dim.Render("[") + green.Render("x") + dim.Render("] ") + green.Render("on")
 	}
-	return dim.Render("[ ] ") + yellow.Render("false")
+	return dim.Render("[ ] ") + yellow.Render("off")
 }
 
 // ciDot renders one colored pipeline-status dot for an open MR.
