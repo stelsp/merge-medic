@@ -20,6 +20,9 @@ var (
 	amber   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	amberB  = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
 	borderC = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	// plain: the terminal's own foreground — used for details of rows that
+	// already carry a state color, so they stay legible on washed-out themes
+	lipglossPlain = lipgloss.NewStyle()
 	// body of a panel: sharp border, no top edge — the top line is drawn by
 	// titledBox with the title embedded in the border itself
 	section = lipgloss.NewStyle().

@@ -172,3 +172,71 @@ func nonEmpty(in []string) []string {
 	}
 	return out
 }
+
+// stripANSI removes escape sequences from foreign text (resolver stderr,
+// gate output). Cutting a styled string mid-escape leaks "31m" into the UI
+// and an unbalanced reset bleeds color across the rest of the frame, so
+// details are stripped once at parse time and cut afterwards. Handles CSI
+// (including private "?25l" forms), OSC strings and their BEL/ST terminator,
+// and two-byte escapes; a stray BEL would otherwise beep on every repaint.
+func stripANSI(s string) string {
+	if !strings.ContainsAny(s, "\x1b\a") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c == '\a' { // BEL: the terminal would beep once per frame
+			i++
+			continue
+		}
+		if c != 0x1b {
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		if i+1 >= len(s) {
+			break // lone ESC at the end
+		}
+		switch s[i+1] {
+		case '[': // CSI: params (digits ; : ? < = >), intermediates, final byte
+			j := i + 2
+			for j < len(s) && strings.IndexByte("0123456789;:?<=>", s[j]) >= 0 {
+				j++
+			}
+			for j < len(s) && s[j] >= 0x20 && s[j] <= 0x2f {
+				j++
+			}
+			if j < len(s) {
+				j++ // the final byte
+			}
+			i = j
+		case ']': // OSC: runs until BEL or ST (ESC \)
+			j := i + 2
+			for j < len(s) {
+				if s[j] == '\a' {
+					j++
+					break
+				}
+				if s[j] == 0x1b && j+1 < len(s) && s[j+1] == '\\' {
+					j += 2
+					break
+				}
+				j++
+			}
+			i = j
+		default:
+			// ESC with intermediates (ESC ( B — charset selection) runs to
+			// its final byte; anything else is a plain two-byte escape
+			j := i + 1
+			for j < len(s) && s[j] >= 0x20 && s[j] <= 0x2f {
+				j++
+			}
+			if j < len(s) {
+				j++
+			}
+			i = j
+		}
+	}
+	return b.String()
+}

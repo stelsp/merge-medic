@@ -56,6 +56,15 @@ mm_src_is_auto() {
   return 1
 }
 
+# Squeeze foreign text (git stderr, test output) into one safe log detail:
+# no ANSI, no control bytes, single line, capped — an uncapped detail would
+# evict real events from the dashboard's fixed-size log tail.
+mm_clean() {
+  LC_ALL=C sed $'s/\033\[[0-9;]*[a-zA-Z]//g' \
+    | tr -d '\000-\010\013-\037' \
+    | tr '\n' ' ' | cut -c1-160
+}
+
 # Read KEY out of config file $1 without sourcing it (quotes stripped).
 mm_cfg_get() {
   sed -n "s/^$2=[\"']\{0,1\}\([^\"']*\).*/\1/p" "$1" | head -1

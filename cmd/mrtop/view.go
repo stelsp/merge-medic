@@ -578,7 +578,7 @@ func (m model) View() string {
 	if m.showLog {
 		lb.WriteString(bold.Render("log ") + dim.Render(m.logName) + "\n")
 		for _, ln := range m.logLines {
-			lb.WriteString(dim.Render("│ ") + trunc(ln, lw-4) + "\n")
+			lb.WriteString(dim.Render("│ ") + truncate.String(ln, uint(max(1, lw-4))) + "\n")
 		}
 	}
 

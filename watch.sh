@@ -26,7 +26,13 @@ STATE="$ROOT/state"; mkdir -p "$STATE"
 # not silence live mode. Otherwise flipping DRY_RUN=1 -> 0 does nothing until
 # somebody moves a branch.
 MARK="tried"; [ "${DRY_RUN:-1}" = "1" ] && MARK="dry"
+SIGIL="$(mm_ref_sigil)"
 log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG"; }
+# logc writes a channel-tagged line the dashboard splits into columns:
+#   <ts>  CHANNEL !42 detail        (channel, optional MR id, free detail)
+# Plain log() lines still work and still render — the parser falls back.
+# Channels: TICK CONFLICT CLEARED SKIP FIX RADAR BUDGET LOCK ROTATE WARN ERROR
+logc() { local ch="$1" iid="$2"; shift 2; log "$ch${iid:+ $SIGIL$iid} $*"; }
 
 notify() { mm_notify "$@"; }
 
@@ -45,7 +51,7 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   if [ -n "$prev" ] && kill -0 "$prev" 2>/dev/null; then
     exit 0   # previous tick still running — leave silently
   fi
-  log "WARN: removing stale lock (pid ${prev:-?})"; rm -rf "$LOCK"; mkdir "$LOCK"
+  logc WARN "" "removing stale lock (pid ${prev:-?} is gone)"; rm -rf "$LOCK"; mkdir "$LOCK"
 fi
 echo $$ > "$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
@@ -57,13 +63,43 @@ today="$(date '+%Y-%m-%d')"
 BUDGET_FILE="$STATE/budget-$today"
 [ -f "$BUDGET_FILE" ] || echo 0 > "$BUDGET_FILE"
 find "$STATE" -name 'budget-*' -mtime +3 -delete 2>/dev/null || true
+# skip-* remember the last reason an MR was passed over; a week without a
+# touch means the MR is long gone
+find "$STATE" -name 'skip-*' -mtime +7 -delete 2>/dev/null || true
 spent="$(cat "$BUDGET_FILE")"
 
 # ── pick conflicted MRs/PRs not yet tried ─────────────────────────────────────
 targets=""   # iid<TAB>source<TAB>target<TAB>title
 N_OPEN=0; N_CONF=0
 verbose=0
-SIGIL="$(mm_ref_sigil)"
+# why MRs were passed over this tick — reported as counts in the TICK line
+# instead of one line per MR per tick (that would be pure noise at 3-minute
+# intervals and would evict real events from the dashboard's log tail)
+SK_DEDUP=0; SK_DRAFT=0; SK_EXCL=0; SK_INCL=0; SK_DEFER=0
+
+# notify_once fires a desktop notification only when the situation changes.
+# A broken token or an exhausted budget persists for hours: without this the
+# watcher would notify on every tick (480/day at the default interval).
+notify_once() { # kind key title body
+  local f="$STATE/notified-$1"
+  if [ "$(cat "$f" 2>/dev/null || echo '')" = "$2" ]; then return 0; fi
+  printf '%s' "$2" > "$f"
+  notify "$3" "$4"
+}
+
+# skip_once logs why an MR was passed over — but only when the reason (or its
+# key, e.g. the sha pair) changed since last tick. Repeating it every tick
+# would bury real events in the dashboard's fixed-size log tail.
+skip_once() { # iid key detail
+  local f="$STATE/skip-$1"
+  if [ "$(cat "$f" 2>/dev/null || echo '')" = "$2" ]; then
+    touch "$f"   # still true: keep it out of reach of the weekly sweep
+    return 0
+  fi
+  printf '%s' "$2" > "$f"
+  logc SKIP "$1" "$3"
+  verbose=1
+}
 
 # Shared edge/dedup logic: called once per MR/PR with normalized fields.
 consider() {
@@ -75,19 +111,33 @@ consider() {
   # status shas src tgt ci author updated title — for the dashboard
   echo "$status $ssha:$tsha $src $tgt $ci $author $upd $title" > "$seen_file"
 
+  # edge: state change worth logging + notifying
+  # only a definite "mergeable" closes a conflict: GitHub answers UNKNOWN
+  # while it recomputes after a push, and a failed detail call falls back to
+  # "unknown" — reporting either as resolved would be a lie the next tick
+  # immediately contradicts
+  if [ "$status" = "mergeable" ] && [ "$prev_status" = "conflict" ]; then
+    logc CLEARED "$iid" "conflict resolved · $src -> $tgt"; verbose=1
+  fi
+
   [ "$status" != "conflict" ] && return 0
 
-  # edge: state change worth logging + notifying
   if [ "$prev_status" != "conflict" ]; then
-    log "  $SIGIL$iid  went into CONFLICT  ($src -> $tgt)  $title"; verbose=1
+    logc CONFLICT "$iid" "$src -> $tgt · $title"; verbose=1
     notify "Conflict in $SIGIL$iid" "$src -> $tgt: $title"
   fi
 
-  if [ "${SKIP_DRAFTS:-1}" = "1" ] && [ "$draft" = "true" ]; then return 0; fi
+  if [ "${SKIP_DRAFTS:-1}" = "1" ] && [ "$draft" = "true" ]; then
+    SK_DRAFT=$((SK_DRAFT + 1)); skip_once "$iid" "draft" "draft · SKIP_DRAFTS=1"; return 0
+  fi
 
   local ex
   # shellcheck disable=SC2153  # EXCLUDE_BRANCHES comes from config.env
-  for ex in ${EXCLUDE_BRANCHES:-}; do [ "$src" = "$ex" ] && return 0; done
+  for ex in ${EXCLUDE_BRANCHES:-}; do
+    if [ "$src" = "$ex" ]; then
+      SK_EXCL=$((SK_EXCL + 1)); skip_once "$iid" "excl:$ex" "excluded · EXCLUDE_BRANCHES matches '$ex'"; return 0
+    fi
+  done
 
   # allowlist: when INCLUDE_BRANCHES is set, only matching source branches
   # are handled at all (globs, space-separated); empty = every branch
@@ -97,7 +147,9 @@ consider() {
       # shellcheck disable=SC2254
       case "$src" in $inc) ok=1;; esac
     done
-    [ "$ok" = "1" ] || return 0
+    if [ "$ok" != "1" ]; then
+      SK_INCL=$((SK_INCL + 1)); skip_once "$iid" "incl" "filtered · '$src' matches no INCLUDE_BRANCHES glob"; return 0
+    fi
   fi
 
   # routing: AUTO_BRANCHES sources are fixed fully automatically; everything
@@ -109,6 +161,7 @@ consider() {
   if [ -f "$STATE/approve-$iid" ]; then
     mode="fix-approved"
     rm -f "$STATE/approve-$iid"
+    logc FIX "$iid" "approval consumed · mode=fix-approved"; verbose=1
   fi
 
   # deferred (branch was hot): retry on every tick — the fixer re-checks the
@@ -118,16 +171,22 @@ consider() {
   # The 60s grace only shields the fixer launched by the previous tick.
   if [ -f "$STATE/deferred-$iid" ]; then
     dts="$(cat "$STATE/deferred-$iid")"
-    if [ $(( $(date +%s) - dts )) -lt 60 ]; then
-      return 0
+    local dage=$(( $(date +%s) - dts ))
+    if [ "$dage" -lt 60 ]; then
+      SK_DEFER=$((SK_DEFER + 1)); skip_once "$iid" "defer" "defer grace · deferred ${dage}s ago (<60s)"; return 0
     fi
     rm -f "$STATE/deferred-$iid" "$STATE/$MARK-$iid"
+    logc FIX "$iid" "defer expired after ${dage}s · eligible again"; verbose=1
   fi
 
   # this exact commit pair was already tried and failed — don't burn tokens again
   if [ -f "$STATE/$MARK-$iid" ] && [ "$(cat "$STATE/$MARK-$iid")" = "$ssha:$tsha" ]; then
+    SK_DEDUP=$((SK_DEDUP + 1))
+    skip_once "$iid" "dedup:$ssha:$tsha" "dedup · already tried ${ssha:0:7}:${tsha:0:7} — push either branch to retry"
     return 0
   fi
+
+  rm -f "$STATE/skip-$iid"   # this MR is being worked on; forget its last excuse
 
   targets+="$iid	$src	$tgt	$mode	$title
 "
@@ -135,11 +194,13 @@ consider() {
 
 if mm_is_github; then
   # ── GitHub via gh ───────────────────────────────────────────────────────────
-  command -v gh >/dev/null 2>&1 || { log "ERROR: PROVIDER=github but gh is not installed"; exit 1; }
+  command -v gh >/dev/null 2>&1 || { logc ERROR "" "PROVIDER=github but gh is not installed"; exit 1; }
   prs="$(gh pr list --repo "$PROJECT_PATH" --state open --limit 100 \
         --json number,title,headRefName,baseRefName,mergeable,isDraft,headRefOid,statusCheckRollup,author,updatedAt 2>/dev/null || echo '')"
   if [ -z "$prs" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$prs"; then
-    log "ERROR: could not list PRs (check gh auth status)"; exit 1
+    logc ERROR "" "could not list PRs — check: gh auth status"
+    notify_once forge "prs" "merge-medic: cannot list PRs" "check gh auth status"
+    exit 1
   fi
   while IFS= read -r row; do
     iid="$(jq -r '.number' <<<"$row")"
@@ -171,7 +232,9 @@ else
   export GITLAB_HOST
   mrs="$(glab api "projects/$ENC_PATH/merge_requests?state=opened&per_page=100" 2>/dev/null || echo '')"
   if [ -z "$mrs" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$mrs"; then
-    log "ERROR: could not list MRs (check glab auth status / GITLAB_TOKEN)"; exit 1
+    logc ERROR "" "could not list MRs — check: glab auth status / GITLAB_TOKEN"
+    notify_once forge "mrs" "merge-medic: cannot list MRs" "check glab auth status"
+    exit 1
   fi
   # One request covers the whole tick: the list response carries everything
   # except head_pipeline/base_sha — a per-MR detail request happens only when
@@ -246,7 +309,7 @@ radar_scan() {
       if ! git -C "$WATCH_REPO" merge-tree --write-tree "origin/$a_src" "origin/$b_src" >/dev/null 2>&1; then
         printf '%s|%s|%s|%s\n' "$a_iid" "$b_iid" "$a_src" "$b_src" >> "$out"
         if ! grep -qF "$a_iid|$b_iid|" "$STATE/radar" 2>/dev/null; then
-          log "RADAR: $SIGIL$a_iid ($a_src) and $SIGIL$b_iid ($b_src) conflict with EACH OTHER — first to merge wins"
+          logc RADAR "" "$SIGIL$a_iid×$SIGIL$b_iid · $a_src ↔ $b_src conflict with each other — first to merge wins"
           notify "Radar: $SIGIL$a_iid × $SIGIL$b_iid" "$a_src and $b_src conflict with each other"
         fi
       fi
@@ -256,11 +319,26 @@ radar_scan() {
 }
 radar_scan
 
+rm -f "$STATE/notified-forge"   # the forge answered — a later outage may notify
+
+# one line per tick, carrying why nothing (or something) happened
+tick_line() {
+  local sk=$((SK_DEDUP + SK_DRAFT + SK_EXCL + SK_INCL + SK_DEFER)) why=""
+  [ "$SK_DEDUP" -gt 0 ] && why="$why, $SK_DEDUP dedup"
+  [ "$SK_DRAFT" -gt 0 ] && why="$why, $SK_DRAFT draft"
+  [ "$SK_EXCL"  -gt 0 ] && why="$why, $SK_EXCL excluded"
+  [ "$SK_INCL"  -gt 0 ] && why="$why, $SK_INCL filtered"
+  [ "$SK_DEFER" -gt 0 ] && why="$why, $SK_DEFER deferred"
+  [ -n "$why" ] && why=" (${why#, })"
+  printf '%s open · %s conflicted · %s skipped%s · %s' \
+    "$N_OPEN" "$N_CONF" "$sk" "$why" "$( [ "${DRY_RUN:-1}" = "1" ] && echo "watch-only" || echo "fixing" )"
+}
+
 if [ -z "$targets" ]; then
   if [ "$verbose" = "1" ]; then
-    log "no new conflicts to fix"
+    logc TICK "" "$(tick_line) — nothing new to fix"
   else
-    log "tick: $N_OPEN open, $N_CONF conflicted — nothing new"
+    logc TICK "" "$(tick_line) — nothing new"
   fi
   exit 0
 fi
@@ -268,19 +346,25 @@ fi
 count="$(printf '%s' "$targets" | grep -c . || true)"
 lim="${DAILY_AGENT_RUNS:-6}"
 lim_label="$lim"; [ "$lim" = "0" ] && lim_label="∞"
-log "to fix: $count MR(s); AI budget spent today: $spent/$lim_label"
+logc TICK "" "$(tick_line) — $count to fix · AI budget $spent/$lim_label"
 
 if [ "$lim" -gt 0 ] && [ "$spent" -ge "$lim" ]; then
-  log "daily AI budget exhausted — skipping"; exit 0
+  dropped="$(printf '%s' "$targets" | cut -f1 | tr '\n' ' ')"
+  logc BUDGET "" "daily AI budget exhausted $spent/$lim — dropping: ${dropped% }"
+  notify_once budget "$today:$lim" "AI budget exhausted ($spent/$lim)" "not fixing: ${dropped% }"
+  exit 0
 fi
 
+if [ "$count" -gt "$MAX_MRS_PER_RUN" ]; then
+  logc SKIP "" "cap · MAX_MRS_PER_RUN=$MAX_MRS_PER_RUN dropped $((count - MAX_MRS_PER_RUN)) target(s) to the next tick"
+fi
 targets="$(printf '%s' "$targets" | head -n "$MAX_MRS_PER_RUN")"
 # Every $targets loop below reads via `<<<` herestring, NOT `printf | while`:
 # a pipe would also work, but $( ) above already stripped the final \n and a
 # piped `read` would then lose the last record — and with it the "already
 # tried" mark, i.e. an eternal retry.
 while IFS=$'\t' read -r iid src tgt mode _; do
-  [ -n "$iid" ] && log "  -> $SIGIL$iid  $src -> $tgt  [$mode]"
+  [ -n "$iid" ] && logc FIX "$iid" "queued · $src -> $tgt [$mode]"
 done <<<"$targets"
 
 # mark_tried records the (source,target) sha pair the fixer is about to work
@@ -288,7 +372,7 @@ done <<<"$targets"
 mark_tried() { cut -d' ' -f2 "$STATE/mr-$1" > "$STATE/$MARK-$1" 2>/dev/null || true; }
 
 if [ "${DRY_RUN:-1}" = "1" ]; then
-  log "DRY_RUN=1 — not merging or pushing anything"
+  logc TICK "" "watch-only (DRY_RUN=1) — $count conflict(s) detected, nothing merged or pushed"
   while IFS=$'\t' read -r iid _ _ _; do
     [ -z "$iid" ] && continue
     mark_tried "$iid"
@@ -298,11 +382,13 @@ fi
 
 # ── dedicated clone (created lazily, only when there is real work) ────────────
 if [ ! -d "$WATCH_REPO/.git" ]; then
-  log "cloning $GIT_REMOTE_URL -> $WATCH_REPO"
+  logc FIX "" "cloning $GIT_REMOTE_URL -> $WATCH_REPO (first run)"
   git clone --quiet "$GIT_REMOTE_URL" "$WATCH_REPO" >>"$LOG" 2>&1
 fi
 git -C "$WATCH_REPO" fetch --prune --quiet origin >>"$LOG" 2>&1 || {
-  log "ERROR: git fetch failed"; exit 1; }
+  logc ERROR "" "git fetch failed — see the lines above"
+  notify_once forge "fetch" "merge-medic: git fetch failed" "the watcher cannot reach the remote"
+  exit 1; }
 
 # ── mark pairs as tried BEFORE launching (no retry loops on crashes) ──────────
 while IFS=$'\t' read -r iid _ _ _; do
@@ -320,10 +406,13 @@ notify "Conflicts: $count MR(s)" "Launching fixers (mrwatch top for progress)"
 launched=0
 while IFS=$'\t' read -r iid src tgt mode title; do
   [ -z "$iid" ] && continue
-  while [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; do sleep 5; done
-  log "  fixer -> $SIGIL$iid  ($src -> $tgt) [$mode]; log: fixer-$iid.log"
+  if [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; then
+    logc FIX "$iid" "waiting for a slot · $(running_fixers)/${PARALLEL_FIXERS:-1} fixers busy"
+    while [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; do sleep 5; done
+  fi
   nohup bash "$ROOT/fix-mr.sh" "$iid" "$src" "$tgt" "$title" "$mode" >> "$LOGDIR/fixer-$iid.log" 2>&1 &
+  logc FIX "$iid" "fixer started · $src -> $tgt [$mode] pid=$! log: fixer-$iid.log"
   launched=$((launched + 1))
   sleep 1
 done <<<"$targets"
-log "fixers launched: $launched (cap ${PARALLEL_FIXERS:-1}); results arrive as notifications"
+logc FIX "" "$launched fixer(s) launched (cap ${PARALLEL_FIXERS:-1}) — results arrive as notifications"
