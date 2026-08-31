@@ -49,7 +49,11 @@ func (m *model) adjustSetting(dir int) {
 		m.snap.daemon = on
 		m.daemonWant, m.daemonWantTicks = on, 20 // ~10s of grace
 		go setDaemon(m.root, on)
-	case 1: // ai budget; 0 = unlimited
+	case 1: // fixing: DRY_RUN inverted — off keeps every event, skips the merge
+		dry := !m.snap.dryRun
+		setConfigVal(m.root, "DRY_RUN", boolToConf(dry))
+		m.snap.dryRun = dry
+	case 2: // ai budget; 0 = unlimited
 		cur, _ := strconv.Atoi(m.snap.budgetMax)
 		cur += dir
 		if cur < 0 {
@@ -57,14 +61,14 @@ func (m *model) adjustSetting(dir int) {
 		}
 		setConfigVal(m.root, "DAILY_AGENT_RUNS", strconv.Itoa(cur))
 		m.snap.budgetMax = strconv.Itoa(cur)
-	case 2: // delivery
+	case 3: // delivery
 		mode := "mr"
 		if m.snap.pushMode == "mr" {
 			mode = "direct"
 		}
 		setConfigVal(m.root, "PUSH_MODE", "\""+mode+"\"")
 		m.snap.pushMode = mode
-	case 3: // model (claude only)
+	case 4: // model (claude only)
 		if m.snap.resolver != "claude" {
 			return
 		}
@@ -206,7 +210,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			if m.focus == 3 {
-				if m.selS < 3 {
+				if m.selS < 4 {
 					m.selS++
 				}
 				break

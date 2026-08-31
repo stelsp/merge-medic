@@ -22,7 +22,7 @@ type model struct {
 	selF       int    // fleet cursor
 	lastFeed   string // newest feed line, for the typewriter effect
 	typeK      int    // typed width of the newest feed line
-	selS       int    // STATUS settings cursor: 0 daemon · 1 budget · 2 deliver · 3 model
+	selS       int    // STATUS settings cursor: 0 daemon · 1 fixing · 2 budget · 3 deliver · 4 model
 	// a daemon toggle is a launchctl/systemctl round-trip: show the requested
 	// state until the scheduler catches up, so the row cannot flicker back
 	daemonWant      bool
