@@ -249,9 +249,14 @@ func (m model) View() string {
 		pm = yellow.Render("via resolution MR")
 	}
 	deliverLine := dim.Render("deliver ") + pm
+	daemonLine := dim.Render("daemon  ") + d
+	if !s.daemon {
+		daemonLine += dim.Render(" — no ticks scheduled")
+	}
 	statusLines := []string{
-		fmt.Sprintf("%s %s · daemon %s", amber.Render(string(orbit[m.frame%len(orbit)])),
-			time.Now().Format("15:04:05"), d),
+		fmt.Sprintf("%s %s", amber.Render(string(orbit[m.frame%len(orbit)])),
+			time.Now().Format("15:04:05")),
+		daemonLine,
 		budgetLine,
 		deliverLine,
 		modelLine2,
@@ -639,7 +644,7 @@ func (m model) View() string {
 		case 2:
 			fk = []string{key("↑↓", "scroll"), key("esc", "follow")}
 		case 3:
-			fk = []string{key("↑↓", "setting"), key("←→", "change")}
+			fk = []string{key("↑↓", "setting"), key("←→", "change"), key("r", "tick now")}
 		case 4, 5:
 			fk = []string{key("enter", "full breakdown")}
 		}
@@ -661,7 +666,7 @@ func (m model) helpView() string {
 		{"l", "fixer/AI log panel for the selected MR"},
 		{"1 / 2 / 3", "screens: dashboard / hotspots / fleet"},
 		{"", "hotspots: i analyze (cached) · tab+↑↓ scroll answer · ←→ model · y copy prompt"},
-		{"r / p", "force a tick / pause the daemon"},
+		{"r / p", "force a tick / toggle the daemon (also ←→ on the daemon setting)"},
 		{"esc", "close things: settings, screens, log, expanded rows, live scroll"},
 		{"q", "quit"},
 	}
