@@ -49,6 +49,14 @@ func readConfigVal(root, key, def string) string {
 	return def
 }
 
+// boolToConf renders a shell-style flag: config.env uses 1/0, not true/false.
+func boolToConf(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
 // daemonLoaded checks this instance's scheduler job — the job name is derived
 // from the install dir basename (multi-instance: one clone per watched repo).
 func daemonLoaded(root string) bool {

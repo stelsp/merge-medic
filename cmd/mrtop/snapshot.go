@@ -37,6 +37,7 @@ type snapshot struct {
 	mrs                  []mrState
 	budget, budgetMax    string
 	daemon               bool
+	dryRun               bool // DRY_RUN=1: watch and report, never merge or push
 	ok, bad, esc         int
 	tok, tbad, tesc      int
 	tclean, tai          int
@@ -238,6 +239,7 @@ func readSnapshot(root string, width int) snapshot {
 		s.budget = strings.TrimSpace(string(b))
 	}
 	s.daemon = daemonLoaded(root)
+	s.dryRun = readConfigVal(root, "DRY_RUN", "1") == "1"
 	s.pushMode = readConfigVal(root, "PUSH_MODE", "direct")
 	s.resolver = readConfigVal(root, "RESOLVER", "claude")
 	if s.resolver == "claude" {
