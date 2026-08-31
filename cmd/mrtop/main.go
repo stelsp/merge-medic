@@ -39,6 +39,17 @@ func main() {
 		}
 
 		m.snap = readSnapshot(m.root, m.width)
+		// MRTOP_EXPAND=<iid> renders that MR expanded (smoke tests, demos)
+		if iid := os.Getenv("MRTOP_EXPAND"); iid != "" {
+			m.expandedMR[iid] = true
+			for i, mr := range m.snap.mrs {
+				if mr.iid == iid {
+					m.selM = i
+				}
+			}
+		}
+		m.pollCI()
+		ciSettle(4 * time.Second)
 		fmt.Println(m.View())
 		return
 	}

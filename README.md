@@ -196,24 +196,34 @@ The dashboard is **`mrtop`** — a Go /
 `install.sh` when Go is present (a pure-bash fallback reads the same phase
 logs; `MRWATCH_PLAIN=1` forces it). Three screens:
 
-- **`1` main** — **STATUS / RUNS / SPEND** (budget, watcher heartbeat with a
-  red warning when ticks stop, day counters, 14-day sparkline, per-model $
+- **`1` main** — **STATUS / RUNS / SPEND** (settings, watcher heartbeat with
+  a red warning when ticks stop, day counters, 14-day sparkline, per-model $
   spend), **ACTIVE**: live fixers on a segmented 8-phase path bar (a stalled
-  phase gets a red ⏱ suspicion mark) plus every open MR — conflicted first —
-  with mergeability, CI dot, author, age and ⚡ radar marks, then the
-  **HISTORY** ledger; the right side is a full-height **LIVE** event rail
-  with wrap and scrollback.
-- **`2` insights** — conflict **HOTSPOTS** (the files that keep conflicting,
-  across all archived runs) and **SPEND** analytics ($/day sparkline, most
-  expensive runs).
+  phase gets a red ⏱ suspicion mark), **MRS**: every open MR — conflicted
+  first — with mergeability, a **live pipeline strip**, author, age and ⚡
+  radar marks, then the **HISTORY** ledger; the right side is a full-height
+  **LIVE** event rail with wrap and scrollback.
+- **`2` hotspots** — the files that keep conflicting across all archived
+  runs; `i` asks the resolver why a file is a conflict magnet and how to
+  stop it (cached per file state, so the answer does not drift), `←→` picks
+  the model for that answer, `y` copies the prompt.
 - **`3` fleet** — every installed instance with daemon state, today's AI
   runs and live conflict count; `enter` re-roots the dashboard onto another
   instance without leaving the TUI.
 
-`tab` moves focus (amber border); `enter` expands a run's phase timeline or
-an MR's details, `o` opens the MR in the browser, `a` approves a plan,
-`+`/`-` adjust the daily AI budget from the STATUS panel, `l` shows the
-fixer/AI log, `r` forces a tick, `p` pauses, `?` help, `q` quit.
+The pipeline strip is polled by the dashboard itself every few seconds
+(only for pipelines that are still moving, plus the row under the cursor),
+so it fills up in real time between the watcher's much rarer ticks. `enter`
+on an MR lists the individual jobs with their state.
+
+`tab` cycles focus (MRS → HISTORY → LIVE → SETTINGS → RUNS → SPEND, amber
+border). In **SETTINGS** the arrows change the selected row: **daemon**
+(scheduler on/off), **fixing** (watch-only: keep every event, never merge),
+**ai-budget**, **deliver** (direct push or resolution MR) and **model**.
+`enter` expands a run's phase timeline or an MR's details (and on RUNS /
+SPEND opens the 14-day breakdowns), `o` opens the MR in the browser, `a`
+approves a plan, `c` opens the escalation chat, `l` shows the fixer/AI log,
+`r` forces a tick, `p` pauses, `?` help, `q` quit.
 
 ## Configuration
 
