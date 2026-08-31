@@ -172,3 +172,35 @@ func nonEmpty(in []string) []string {
 	}
 	return out
 }
+
+// stripANSI removes escape sequences from foreign text (resolver stderr,
+// gate output). Cutting a styled string mid-escape leaks "31m" into the UI
+// and an unbalanced reset bleeds color across the rest of the frame, so
+// details are stripped once at parse time and cut afterwards.
+func stripANSI(s string) string {
+	if !strings.ContainsRune(s, 0x1b) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b {
+			j := i + 1
+			if j < len(s) && s[j] == '[' {
+				j++
+				for j < len(s) && (s[j] == ';' || (s[j] >= '0' && s[j] <= '9')) {
+					j++
+				}
+				if j < len(s) { // the final byte of the sequence
+					j++
+				}
+				i = j
+				continue
+			}
+			i++ // lone ESC
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}

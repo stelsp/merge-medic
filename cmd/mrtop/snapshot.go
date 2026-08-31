@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/charmbracelet/lipgloss"
 )
 
 // item is one row: a live fixer or a finished run from the ledger.
@@ -103,80 +101,17 @@ func tailBytes(path string, max int64) []string {
 		off = st.Size() - max
 	}
 	buf := make([]byte, st.Size()-off)
-	if _, err := f.ReadAt(buf, off); err != nil && len(buf) == 0 {
-		return nil
+	n, err := f.ReadAt(buf, off)
+	if n == 0 {
+		return nil // short read, or the file was rotated away mid-read
 	}
+	buf = buf[:n] // never parse the untouched tail of the buffer as NUL bytes
+	_ = err
 	lines := nonEmpty(strings.Split(string(buf), "\n"))
 	if off > 0 && len(lines) > 0 {
 		lines = lines[1:] // first line likely cut mid-way
 	}
 	return lines
-}
-
-type feedLine struct {
-	ts   int64
-	text string
-}
-
-// buildFeed merges watcher lines and fixer phase events into one colored,
-// chronological stream shown in the LIVE panel.
-func buildFeed(root string, width int) []string {
-	var fl []feedLine
-	for _, ln := range tailBytes(filepath.Join(root, "logs", "watch.log"), 32*1024) {
-		if len(ln) < 21 {
-			continue
-		}
-		t, err := time.ParseInLocation("2006-01-02 15:04:05", ln[:19], time.Local)
-		if err != nil {
-			continue
-		}
-		msg := strings.TrimRight(ln[21:], " ")
-		style := dim
-		switch {
-		case strings.Contains(msg, "ERROR"):
-			style = red
-		case strings.Contains(msg, "CONFLICT"):
-			style = yellow
-		case strings.Contains(msg, "fixer ->"):
-			style = green
-		}
-		fl = append(fl, feedLine{t.Unix(),
-			dim.Render(ln[11:19]) + " " + style.Render(trunc(msg, width-12))})
-	}
-	for _, ln := range tailBytes(filepath.Join(root, "logs", "events.log"), 32*1024) {
-		parts := strings.SplitN(ln, "|", 4)
-		if len(parts) < 3 {
-			continue
-		}
-		ts, _ := strconv.ParseInt(parts[0], 10, 64)
-		phase := parts[2]
-		detail := ""
-		if len(parts) > 3 {
-			detail = parts[3]
-		}
-		style := lipgloss.NewStyle()
-		switch phase {
-		case "DONE":
-			style = green
-		case "FAIL":
-			style = red
-		case "AI_RESOLVE", "PLAN", "PLANNED", "ESCALATED":
-			style = yellow
-		}
-		fl = append(fl, feedLine{ts,
-			dim.Render(time.Unix(ts, 0).Format("15:04:05")) + " " +
-				bold.Render("!"+parts[1]) + " " + style.Render(fmt.Sprintf("%-11s", phase)) +
-				" " + dim.Render(trunc(detail, width-30))})
-	}
-	sort.SliceStable(fl, func(i, j int) bool { return fl[i].ts < fl[j].ts })
-	out := make([]string, 0, len(fl))
-	for _, l := range fl {
-		out = append(out, l.text)
-	}
-	if len(out) > 300 {
-		out = out[len(out)-300:]
-	}
-	return out
 }
 
 // readTokens aggregates state/tokens.log (ts|iid|model|in|out|cache|cost).
@@ -351,7 +286,7 @@ func readSnapshot(root string, width int) snapshot {
 		}
 	}
 
-	s.feed = buildFeed(root, 4000)
+	s.feed = buildFeed(root)
 	s.spendToday, s.spend, s.modelLine = readTokens(root, day0)
 	s.spendDaily = make([]float64, 14)
 	if data, err := os.ReadFile(filepath.Join(root, "state", "tokens.log")); err == nil {

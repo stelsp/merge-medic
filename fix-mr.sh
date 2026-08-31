@@ -31,6 +31,27 @@ ev() {
   printf '%s|%s|%s\n' "$ets" "$1" "${2:-}" >> "$PROG"
   printf '%s|%s|%s|%s\n' "$ets" "$IID" "$1" "${2:-}" >> "$LOGDIR/events.log"
 }
+# evx is a side note for the live rail only: it must NOT reach the progress
+# file, whose LAST line is read as the fixer's current phase — a note there
+# would hijack the dashboard's ACTIVE row and reset its progress bar.
+evx() {
+  printf '%s|%s|%s|%s\n' "$(date +%s)" "$IID" "$1" "${2:-}" >> "$LOGDIR/events.log"
+}
+# run_gate <PHASE> <command> — one event before, one after, with the outcome
+# token the dashboard colors by: "ok · 18s" / "red · exit 1 · <tail>".
+run_gate() {
+  local phase="$1" cmd="$2" gs rc=0 tail_out
+  ev "$phase" "run · $(printf '%s' "$cmd" | cut -c1-70)"
+  gs="$(date +%s)"
+  if ( eval "$cmd" ) >> "$LOGDIR/fixer-$IID.log" 2>&1; then
+    ev "$phase" "ok · $(( $(date +%s) - gs ))s"
+    return 0
+  fi
+  rc=$?
+  tail_out="$(tail -n 3 "$LOGDIR/fixer-$IID.log" | mm_clean)"
+  ev "$phase" "red · exit $rc · $tail_out"
+  fail "$phase red (exit $rc, fixer-$IID.log)"
+}
 notify() { mm_notify "$@"; }
 cleanup_wt() { git -C "$WATCH_REPO" worktree remove --force "$WT" 2>/dev/null || true; }
 # Durable all-time ledger (progress files get overwritten per run):
@@ -104,6 +125,7 @@ record_tokens() { # $1 = claude --output-format json result file
 # Token/cost accounting only where the provider reports it (claude).
 resolver_call() {
   local mode="$1" prompt="$2" errlog="$3" rc=0 out
+  evx RESOLVER "info · ${RESOLVER:-claude} ${CLAUDE_MODEL:-${RESOLVER_MODEL:-}} · $mode"
   case "${RESOLVER:-claude}" in
     claude)
       local tools dtools
@@ -124,6 +146,12 @@ resolver_call() {
         --output-format json > "$out" 2>>"$errlog" || rc=$?
       jq -r '.result // empty' "$out" 2>/dev/null || true
       record_tokens "$out"
+      # side note for the live rail: what this call actually cost
+      evx COST "$(jq -r --arg mode "$mode" --arg model "${CLAUDE_MODEL:-opus}" '
+        "info · $" + ((.total_cost_usd // 0) * 100 | round / 100 | tostring)
+        + " · " + ((.usage.input_tokens // 0) | tostring) + " in / "
+        + ((.usage.output_tokens // 0) | tostring) + " out · " + $mode + " · " + $model
+      ' "$out" 2>/dev/null || echo "info · cost unavailable")"
       rm -f "$out"
       ;;
     aider)
@@ -188,13 +216,13 @@ collect_feedback() { # $1 = plan file; its mtime is the cutoff
 }
 
 : > "$PROG"
-ev START "$SRC -> $TGT"
+ev START "$SRC -> $TGT · mode=$MODE · $(printf '%s' "${TITLE:-}" | cut -c1-60)"
 
 # ── push guard: non-AUTO branches are only ever pushed by an approved run ─────
 src_is_auto=0
 mm_src_is_auto "$SRC" && src_is_auto=1
 if [ "$src_is_auto" = "0" ] && [ "$MODE" != "plan" ] && [ "$MODE" != "fix-approved" ]; then
-  fail "source branch '$SRC' is not in AUTO_BRANCHES and no approve exists"
+  fail "policy · '$SRC' is not in AUTO_BRANCHES and no approval exists"
 fi
 
 cd "$WATCH_REPO"
@@ -267,7 +295,7 @@ else
       case "$f" in
         $pat)
           git merge --abort 2>/dev/null || true
-          escalate "conflict in protected path: $f (matches '$pat')"
+          escalate "policy · protected path $f matches ESCALATE_PATTERNS '$pat'"
           ;;
       esac
     done
@@ -444,31 +472,37 @@ $(cat "$ROOT/state/esc-$IID.md")
   resolve_mode="ai"
 fi
 
-ev VERIFY "${VERIFY_CMD:-<skipped>}"
 if [ -n "${VERIFY_CMD:-}" ]; then
-  ( eval "$VERIFY_CMD" ) >> "$LOGDIR/fixer-$IID.log" 2>&1 || fail "verify red (fixer-$IID.log)"
+  run_gate VERIFY "$VERIFY_CMD"
+else
+  ev VERIFY "skip · VERIFY_CMD is empty"
 fi
 
 # ── focused tests on the conflicted files (AI resolutions only) ───────────────
 if [ "$ai_ran" = "1" ] && [ -n "${TEST_CMD_TEMPLATE:-}" ]; then
   files_flat="$(printf '%s' "${conflicts:-}" | tr '\n' ' ')"
-  tcmd="${TEST_CMD_TEMPLATE//\{files\}/$files_flat}"
-  ev TESTS "$tcmd"
-  ( eval "$tcmd" ) >> "$LOGDIR/fixer-$IID.log" 2>&1 || fail "focused tests red (fixer-$IID.log)"
+  run_gate TESTS "${TEST_CMD_TEMPLATE//\{files\}/$files_flat}"
+elif [ -z "${TEST_CMD_TEMPLATE:-}" ]; then
+  ev TESTS "skip · TEST_CMD_TEMPLATE is empty"
+else
+  ev TESTS "skip · clean merge, no AI resolution to test"
 fi
 
 # ── regression suite ──────────────────────────────────────────────────────────
 when="${REGRESSION_WHEN:-ai}"
-if [ -n "${REGRESSION_CMD:-}" ] && { [ "$when" = "always" ] || { [ "$when" = "ai" ] && [ "$ai_ran" = "1" ]; }; }; then
-  ev REGRESSION "$REGRESSION_CMD"
-  ( eval "$REGRESSION_CMD" ) >> "$LOGDIR/fixer-$IID.log" 2>&1 || fail "regression suite red (fixer-$IID.log)"
+if [ -z "${REGRESSION_CMD:-}" ]; then
+  ev REGRESSION "skip · REGRESSION_CMD is empty"
+elif [ "$when" = "always" ] || { [ "$when" = "ai" ] && [ "$ai_ran" = "1" ]; }; then
+  run_gate REGRESSION "$REGRESSION_CMD"
+else
+  ev REGRESSION "skip · REGRESSION_WHEN=$when and this was a clean merge"
 fi
 
 # ── push: direct (into the source branch) or via a resolution MR/PR ───────────
 res_link=""
 if [ "${PUSH_MODE:-direct}" = "mr" ]; then
   FIXBR="merge-medic/fix-$IID-$(date +%s)"
-  ev PUSH "resolution branch $FIXBR"
+  ev PUSH "mr · resolution branch $FIXBR (your branch stays untouched)"
   git push origin "HEAD:refs/heads/$FIXBR" >/dev/null 2>&1 || fail "push of $FIXBR rejected"
   res_title="merge-medic: resolve conflicts of ${SIGIL}$IID ($SRC <- $TGT)"
   res_body="Automated conflict resolution for ${SIGIL}$IID. Merge this into \`$SRC\` to clear the conflict — your branch is untouched until you do."
@@ -482,14 +516,14 @@ if [ "${PUSH_MODE:-direct}" = "mr" ]; then
       | jq -r '.web_url // empty' || true)"
   fi
   [ -n "$res_link" ] || fail "resolution branch pushed but the MR/PR could not be created ($FIXBR)"
-  ev DONE "resolution MR ready: $res_link"
+  ev DONE "ok · resolution MR ready: $res_link"
   ledger DONE
   notify "${SIGIL}$IID resolved ✓" "review & merge: $res_link"
 else
-  ev PUSH "origin $SRC"
-  git push origin "HEAD:$SRC" >/dev/null 2>&1 || fail "push rejected (branch moved ahead?)"
+  ev PUSH "direct · origin $SRC"
+  git push origin "HEAD:$SRC" >/dev/null 2>&1 || fail "push rejected — $SRC moved ahead, next tick retries"
 
-  ev DONE "merged origin/$TGT, gates green, pushed"
+  ev DONE "ok · merged origin/$TGT into $SRC, gates green, pushed $(git rev-parse --short HEAD)"
   ledger DONE
   notify "${SIGIL}$IID fixed ✓" "$SRC: merge $TGT + gates + push"
 fi
