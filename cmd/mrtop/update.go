@@ -125,6 +125,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.frame++
+		m.pollCI()
 		return m, tick()
 	case tea.KeyMsg:
 		switch msg.String() {

@@ -169,6 +169,51 @@ func (m model) mrsRadar(aw int) []string {
 	return out
 }
 
+// pipelineLines lists the jobs of an expanded MR's pipeline, wrapped into
+// columns so a 20-job pipeline does not push the panel off screen.
+func (m model) pipelineLines(iid string, aw int) string {
+	c, ok := ciOf(iid)
+	if !ok {
+		return "\n" + dim.Render("      pipeline: reading…")
+	}
+	if len(c.jobs) == 0 {
+		return "\n" + dim.Render("      pipeline: no jobs")
+	}
+	head := "\n      " + dim.Render("pipeline ") + ciBar(c, m.frame) + " " + ciCount(c)
+	if c.fail > 0 {
+		head += red.Render(fmt.Sprintf("%d failed", c.fail))
+	} else if c.run > 0 {
+		head += amber.Render(fmt.Sprintf("%d running", c.run))
+	}
+	mark := func(st string) string {
+		switch st {
+		case "pass":
+			return green.Render("✓")
+		case "fail":
+			return red.Render("✗")
+		case "run":
+			return amber.Render(string(spinner[m.frame%len(spinner)]))
+		case "skip":
+			return dim.Render("–")
+		}
+		return dim.Render("·")
+	}
+	const colW = 26
+	cols := max(1, (aw-8)/colW)
+	var out, line strings.Builder
+	for i, j := range c.jobs {
+		line.WriteString(padTo(" "+mark(j.state)+" "+dim.Render(trunc(j.name, colW-4)), colW))
+		if (i+1)%cols == 0 {
+			out.WriteString("\n      " + strings.TrimRight(line.String(), " "))
+			line.Reset()
+		}
+	}
+	if line.Len() > 0 {
+		out.WriteString("\n      " + strings.TrimRight(line.String(), " "))
+	}
+	return head + out.String()
+}
+
 func (m model) renderBanner() string {
 	// one line: a tiny wrench at work (sparks fly) + the name typing itself
 	const name = "merge-medic"
@@ -411,18 +456,25 @@ func (m model) View() string {
 			if hot[mr.iid] {
 				zap = yellow.Render("⚡")
 			}
-			row := fmt.Sprintf(" %s %s %s %s%s%s %s %s %s", ic, ciDot(mr.ci),
+			// pipeline: the live job strip when the dashboard has read the
+			// jobs, the watcher's one-word dot until then
+			pipe := ciDot(mr.ci) + "      "
+			if c, ok := ciOf(mr.iid); ok && len(c.jobs) > 0 {
+				pipe = ciBar(c, m.frame) + " "
+			}
+			row := fmt.Sprintf(" %s %s %s %s%s%s %s %s %s", ic, pipe,
 				bold.Render(fmt.Sprintf("!%-4s", mr.iid)), gear, zap,
 				dim.Render(fmt.Sprintf("%-*s", bcol, trunc(refs[i], bcol))),
 				dim.Render(fmt.Sprintf("%3s", age)),
 				dim.Render(fmt.Sprintf("%-8s", trunc(mr.author, 8))),
-				titleStyled(title, tstyle, aw-(31+bcol)))
+				titleStyled(title, tstyle, aw-(37+bcol)))
 			if i == m.selM && m.focus == 0 {
 				row = selMark(row, aw)
 			}
 			if m.expandedMR[mr.iid] {
 				row += "\n" + dim.Render(trunc(fmt.Sprintf("      %s → %s · by %s · updated %s ago · CI %s",
 					mr.src, mr.tgt, mr.author, age, mr.ci), aw))
+				row += m.pipelineLines(mr.iid, aw)
 				var clashes []string
 				for _, p := range s.radarPairs {
 					if p.a == mr.iid {
@@ -663,7 +715,7 @@ func (m model) helpView() string {
 	rows := [][2]string{
 		{"tab", "cycle: MRS → HISTORY → LIVE → SETTINGS → RUNS → SPEND (enter opens breakdowns)"},
 		{"↑↓ / j k", "move / scroll within the focused panel"},
-		{"enter", "details: MR info + clashes, or a run's phase timeline"},
+		{"enter", "details: MR info + live pipeline jobs + clashes, or a run's phase timeline"},
 		{"o", "open the selected MR/PR in the browser"},
 		{"a", "approve the selected plan (▣ rows)"},
 		{"c", "chat with the resolver about an escalated MR (⚑ rows) — in place"},

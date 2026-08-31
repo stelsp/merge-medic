@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -154,6 +155,80 @@ func ciDot(ci string) string {
 		return dim.Render("·")
 	}
 	return yellow.Render("●")
+}
+
+// ciBar renders a pipeline as a fixed-width strip of job cells: the run
+// order is preserved, so the strip fills left-to-right as jobs finish. Long
+// pipelines are compressed onto the strip (one cell per bucket, worst state
+// wins) — a red cell must never be hidden by a green neighbour.
+func ciBar(c ciStatus, frame int) string {
+	const cells = 6
+	if len(c.jobs) == 0 {
+		return strings.Repeat(" ", cells)
+	}
+	// severity order for compressed cells; "" is the empty bucket and must
+	// rank below every real state, skipped included
+	rank := map[string]int{"": 0, "skip": 1, "pass": 2, "wait": 3, "run": 4, "fail": 5}
+	worst := func(a, b string) string {
+		if rank[b] > rank[a] {
+			return b
+		}
+		return a
+	}
+	// map cells -> jobs (not jobs -> cells): a short pipeline stretches over
+	// the strip instead of leaving holes, a long one folds into it
+	buckets := make([]string, cells)
+	for k := range buckets {
+		lo := k * len(c.jobs) / cells
+		hi := (k + 1) * len(c.jobs) / cells
+		if hi <= lo {
+			hi = lo + 1 // fewer jobs than cells: this cell mirrors job lo
+		}
+		for i := lo; i < hi && i < len(c.jobs); i++ {
+			buckets[k] = worst(buckets[k], c.jobs[i].state)
+		}
+	}
+	var out strings.Builder
+	for _, st := range buckets {
+		switch st {
+		case "pass":
+			out.WriteString(green.Render("▰"))
+		case "fail":
+			out.WriteString(red.Render("▰"))
+		case "run":
+			// the live cell pulses so a stuck pipeline is visibly not stuck
+			if frame%2 == 0 {
+				out.WriteString(amberB.Render("▰"))
+			} else {
+				out.WriteString(amber.Render("▱"))
+			}
+		case "skip":
+			// manual/skipped is not "unfinished" — a filled but muted cell,
+			// so a green pipeline with manual jobs still reads as green
+			out.WriteString(dim.Render("▰"))
+		default:
+			out.WriteString(dim.Render("▱"))
+		}
+	}
+	return out.String()
+}
+
+// ciCount is the "4/7" counter next to the strip: finished jobs of total.
+func ciCount(c ciStatus) string {
+	if len(c.jobs) == 0 {
+		return "     "
+	}
+	txt := fmt.Sprintf("%d/%d", c.pass+c.fail, len(c.jobs))
+	st := dim
+	switch {
+	case c.fail > 0:
+		st = red
+	case c.done():
+		st = green
+	case c.run > 0:
+		st = amber
+	}
+	return st.Render(fmt.Sprintf("%-5s", txt))
 }
 
 var sparkChars = []rune("▁▂▃▄▅▆▇█")
