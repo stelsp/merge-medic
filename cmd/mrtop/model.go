@@ -22,13 +22,17 @@ type model struct {
 	selF       int    // fleet cursor
 	lastFeed   string // newest feed line, for the typewriter effect
 	typeK      int    // typed width of the newest feed line
-	selS       int    // STATUS settings cursor: 0 budget · 1 deliver · 2 model
-	selM       int    // MRS cursor
-	selHot     int    // hotspots screen cursor
-	hotFocus   int    // hotspots screen: 0 = file list, 1 = answer panel
-	hotOff     int    // scroll offset inside the answer panel (0 = top)
-	flash      string // transient footer notice ("prompt copied")
-	flashFrame int    // frame the notice was set on (shown for ~3s)
+	selS       int    // STATUS settings cursor: 0 daemon · 1 budget · 2 deliver · 3 model
+	// a daemon toggle is a launchctl/systemctl round-trip: show the requested
+	// state until the scheduler catches up, so the row cannot flicker back
+	daemonWant      bool
+	daemonWantTicks int
+	selM            int    // MRS cursor
+	selHot          int    // hotspots screen cursor
+	hotFocus        int    // hotspots screen: 0 = file list, 1 = answer panel
+	hotOff          int    // scroll offset inside the answer panel (0 = top)
+	flash           string // transient footer notice ("prompt copied")
+	flashFrame      int    // frame the notice was set on (shown for ~3s)
 }
 
 // rowRef is one selectable dashboard row: a live fixer, an open MR, or a

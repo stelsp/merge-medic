@@ -64,11 +64,14 @@ func daemonLoaded(root string) bool {
 	return exec.Command("systemctl", "--user", "is-active", "--quiet", inst+".timer").Run() == nil
 }
 
-func togglePause(root string) {
-	mrwatch := filepath.Join(root, "bin", "mrwatch")
-	if daemonLoaded(root) {
-		_ = exec.Command("bash", mrwatch, "pause").Run()
-	} else {
-		_ = exec.Command("bash", mrwatch, "resume").Run()
+// setDaemon loads or unloads this instance's scheduler job. Blocking (a
+// launchctl/systemctl round-trip), so callers run it off the render loop.
+func setDaemon(root string, on bool) {
+	cmd := "pause"
+	if on {
+		cmd = "resume"
 	}
+	_ = exec.Command("bash", filepath.Join(root, "bin", "mrwatch"), cmd).Run()
 }
+
+func togglePause(root string) { setDaemon(root, !daemonLoaded(root)) }

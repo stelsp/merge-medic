@@ -41,7 +41,15 @@ func openInBrowser(url string) {
 // it straight to config.env — arrows are the whole interaction.
 func (m *model) adjustSetting(dir int) {
 	switch m.selS {
-	case 0: // ai budget; 0 = unlimited
+	case 0: // daemon: → starts the scheduler, ← stops it (same job as `p`)
+		on := dir > 0
+		if on == m.snap.daemon {
+			return
+		}
+		m.snap.daemon = on
+		m.daemonWant, m.daemonWantTicks = on, 20 // ~10s of grace
+		go setDaemon(m.root, on)
+	case 1: // ai budget; 0 = unlimited
 		cur, _ := strconv.Atoi(m.snap.budgetMax)
 		cur += dir
 		if cur < 0 {
@@ -49,14 +57,14 @@ func (m *model) adjustSetting(dir int) {
 		}
 		setConfigVal(m.root, "DAILY_AGENT_RUNS", strconv.Itoa(cur))
 		m.snap.budgetMax = strconv.Itoa(cur)
-	case 1: // delivery
+	case 2: // delivery
 		mode := "mr"
 		if m.snap.pushMode == "mr" {
 			mode = "direct"
 		}
 		setConfigVal(m.root, "PUSH_MODE", "\""+mode+"\"")
 		m.snap.pushMode = mode
-	case 2: // model (claude only)
+	case 3: // model (claude only)
 		if m.snap.resolver != "claude" {
 			return
 		}
@@ -79,6 +87,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case tickMsg:
 		m.snap = readSnapshot(m.root, m.width)
+		if m.daemonWantTicks > 0 {
+			m.daemonWantTicks--
+			if m.snap.daemon == m.daemonWant {
+				m.daemonWantTicks = 0 // the scheduler caught up
+			} else {
+				m.snap.daemon = m.daemonWant
+			}
+		}
 		if n := len(m.activeRefs()); m.sel >= n {
 			m.sel = max(0, n-1)
 		}
@@ -190,7 +206,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			if m.focus == 3 {
-				if m.selS < 2 {
+				if m.selS < 3 {
 					m.selS++
 				}
 				break
