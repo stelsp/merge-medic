@@ -67,3 +67,19 @@ func TestSegBarStableWidth(t *testing.T) {
 		}
 	}
 }
+
+func TestBoolSwitchWidthAndValue(t *testing.T) {
+	on, off := boolSwitch(true), boolSwitch(false)
+	if !strings.Contains(on, "true") || !strings.Contains(off, "false") {
+		t.Errorf("switch must spell the value: %q / %q", on, off)
+	}
+	// both states must be short enough for the narrow STATUS column
+	for _, sw := range []string{on, off} {
+		if w := lipgloss.Width(sw); w > 10 {
+			t.Errorf("switch too wide: %d cols (%q)", w, sw)
+		}
+	}
+	if strings.Contains(on, "—") || strings.Contains(off, "—") {
+		t.Error("switches must not carry prose — it overflows the panel")
+	}
+}

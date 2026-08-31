@@ -254,11 +254,6 @@ func (m model) View() string {
 	now := time.Now().Unix()
 	wide := m.width >= 110
 
-	d := red.Render("off")
-	if s.daemon {
-		d = green.Render("on")
-	}
-
 	var b strings.Builder
 	if m.height >= 14 {
 		b.WriteString(m.renderBanner())
@@ -294,14 +289,8 @@ func (m model) View() string {
 		pm = yellow.Render("via resolution MR")
 	}
 	deliverLine := dim.Render("deliver ") + pm
-	daemonLine := dim.Render("daemon  ") + d
-	if !s.daemon {
-		daemonLine += dim.Render(" — no ticks, no events")
-	}
-	fixLine := dim.Render("fixing  ") + green.Render("on") + dim.Render(" — conflicts get resolved")
-	if s.dryRun {
-		fixLine = dim.Render("fixing  ") + yellow.Render("off") + dim.Render(" — watch only, nothing is merged")
-	}
+	daemonLine := dim.Render("daemon  ") + boolSwitch(s.daemon)
+	fixLine := dim.Render("fixing  ") + boolSwitch(!s.dryRun)
 	statusLines := []string{
 		fmt.Sprintf("%s %s", amber.Render(string(orbit[m.frame%len(orbit)])),
 			time.Now().Format("15:04:05")),
@@ -723,7 +712,8 @@ func (m model) helpView() string {
 		{"l", "fixer/AI log panel for the selected MR"},
 		{"1 / 2 / 3", "screens: dashboard / hotspots / fleet"},
 		{"", "hotspots: i analyze (cached) · tab+↑↓ scroll answer · ←→ model · y copy prompt"},
-		{"r / p", "force a tick / toggle the daemon (settings rows: daemon · fixing · budget · deliver · model)"},
+		{"r / p", "force a tick / toggle the daemon"},
+		{"", "settings: daemon = ticks at all · fixing = may merge & push (off keeps every event)"},
 		{"esc", "close things: settings, screens, log, expanded rows, live scroll"},
 		{"q", "quit"},
 	}
