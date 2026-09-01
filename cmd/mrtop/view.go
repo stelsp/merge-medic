@@ -578,9 +578,23 @@ func (m model) View() string {
 	lb.WriteString(titledBox(lw, "HISTORY", fmt.Sprintf("%d", s.tok+s.tbad+s.tesc), strings.Join(hist, "\n"), histBoxH, m.focus == 1) + "\n")
 
 	if m.showLog {
-		lb.WriteString(bold.Render("log ") + dim.Render(m.logName) + "\n")
+		head := bold.Render("log ") + amber.Render(m.logName)
+		if m.logOther != "" {
+			head += dim.Render(" · also " + m.logOther)
+		}
+		if m.logOff > 0 {
+			head += dim.Render(fmt.Sprintf(" · %d lines back", m.logOff))
+		}
+		if len(m.logLines) == 0 {
+			head += dim.Render(" — no log yet for this MR")
+		}
+		lb.WriteString(head + "\n")
 		for _, ln := range m.logLines {
-			lb.WriteString(dim.Render("│ ") + truncate.String(ln, uint(max(1, lw-4))) + "\n")
+			st := dim
+			if looksLikeFailure(ln) {
+				st = red // the line the panel was opened to find
+			}
+			lb.WriteString(dim.Render("│ ") + st.Render(truncate.String(ln, uint(max(1, lw-4)))) + "\n")
 		}
 	}
 
@@ -697,6 +711,9 @@ func (m model) View() string {
 			fk = []string{key("enter", "full breakdown")}
 		}
 	}
+	if m.showLog {
+		fk = []string{key("↑↓", "scroll log"), key("l", "close log")}
+	}
 	fk = append(fk, key("tab", "panel"), key("2", "hotspots"), key("3", "fleet"), key("?", "help"), key("q", "quit"))
 	b.WriteString(" " + strings.Join(fk, sep))
 	return b.String()
@@ -711,7 +728,7 @@ func (m model) helpView() string {
 		{"a", "approve the selected plan (▣ rows)"},
 		{"c", "chat with the resolver about an escalated MR (⚑ rows) — in place"},
 		{"R", "retry the selected MR (clears tried/deferred marks, ticks)"},
-		{"l", "fixer/AI log panel for the selected MR"},
+		{"l", "log panel for the selected MR — anchored on the failure, ↑↓ scrolls"},
 		{"1 / 2 / 3", "screens: dashboard / hotspots / fleet"},
 		{"", "hotspots: i analyze (cached) · tab+↑↓ scroll answer · ←→ model · y copy prompt"},
 		{"r / p", "force a tick / toggle the daemon"},

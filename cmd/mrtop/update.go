@@ -85,6 +85,31 @@ func (m *model) adjustSetting(dir int) {
 	}
 }
 
+// logPanelHeight is how many lines the log panel shows — a slice of the
+// frame, never more than a third of it.
+func (m model) logPanelHeight() int {
+	h := m.height/3 - 2
+	if h < 6 {
+		h = 6
+	}
+	if h > 20 {
+		h = 20
+	}
+	return h
+}
+
+// refreshLog reloads the panel for the current selection. With nothing
+// selected it clears: the panel used to keep a merged MR's log under a live
+// MR's header.
+func (m *model) refreshLog() {
+	r, ok := m.selected()
+	if !ok {
+		m.logName, m.logOther, m.logLines = "", "", nil
+		return
+	}
+	m.logName, m.logOther, m.logLines = readLog(m.root, r.iid(), m.logPanelHeight()+m.logOff)
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -112,9 +137,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selHot = max(0, n-1)
 		}
 		if m.showLog {
-			if r, ok := m.selected(); ok {
-				m.logName, m.logLines = readLog(m.root, r.iid())
-			}
+			m.refreshLog()
 		}
 		if n := len(m.snap.feed); n > 0 {
 			if m.snap.feed[n-1] != m.lastFeed {
@@ -157,6 +180,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.focus = (m.focus + 1) % 6
 		case "up", "k":
+			if m.showLog && m.screen == 0 {
+				m.logOff++
+				m.refreshLog()
+				break
+			}
 			if m.screen == 2 {
 				if m.selF > 0 {
 					m.selF--
@@ -193,6 +221,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.liveOff++
 			}
 		case "down", "j":
+			if m.showLog && m.screen == 0 {
+				m.logOff = max(0, m.logOff-1)
+				m.refreshLog()
+				break
+			}
 			if m.screen == 2 {
 				if m.selF < len(readInstances())-1 {
 					m.selF++
@@ -260,10 +293,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "l":
 			m.showLog = !m.showLog
+			m.logOff = 0
 			if m.showLog {
-				if r, ok := m.selected(); ok {
-					m.logName, m.logLines = readLog(m.root, r.iid())
-				}
+				m.refreshLog()
 			}
 		case "a":
 			if r, ok := m.selected(); ok && m.snap.waiters[r.iid()] == "PLANNED" {

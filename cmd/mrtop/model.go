@@ -13,7 +13,9 @@ type model struct {
 	expandedMR map[string]bool
 	showLog    bool
 	logName    string
+	logOther   string // the other candidate log this MR has, named in the header
 	logLines   []string
+	logOff     int // lines scrolled back from the anchored window (0 = anchored)
 	frame      int
 	width      int
 	height     int

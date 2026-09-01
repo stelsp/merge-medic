@@ -502,9 +502,16 @@ func readSnapshot(root string) snapshot {
 	return s
 }
 
-func readLog(root, iid string) (string, []string) {
+// readLog returns the tail of the newest log for an MR — the resolver
+// session if there is one, else the fixer transcript — plus the other
+// candidate's name for the header.
+//
+// The window is anchored on the failure, not on the end of the file: a
+// failed run's last lines are the resolver's closing summary, while the
+// diagnostic that explains the failure sits somewhere above it.
+func readLog(root, iid string, window int) (name, other string, lines []string) {
 	if iid == "" {
-		return "", nil
+		return "", "", nil
 	}
 	candidates, _ := filepath.Glob(filepath.Join(root, "logs", "ai-"+iid+"-*.log"))
 	candidates = append(candidates, filepath.Join(root, "logs", "fixer-"+iid+".log"))
@@ -516,20 +523,70 @@ func readLog(root, iid string) (string, []string) {
 		}
 	}
 	if newest == "" {
-		return "", nil
+		return "", "", nil
 	}
-	data, err := os.ReadFile(newest)
-	if err != nil {
-		return filepath.Base(newest), nil
+	for _, c := range candidates {
+		if c != newest {
+			if _, err := os.Stat(c); err == nil {
+				other = filepath.Base(c)
+			}
+		}
 	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	if len(lines) > 12 {
-		lines = lines[len(lines)-12:]
+	// a resolver session is a whole transcript, and this is re-read while the
+	// panel is open — never load the entire file
+	all := tailBytes(newest, 64*1024)
+	for i, ln := range all {
+		all[i] = stripANSI(ln)
 	}
-	// resolver and test output is full of escapes; a cut inside one bleeds
-	// color across the rest of the frame
-	for i, ln := range lines {
-		lines[i] = stripANSI(ln)
+	if window < 4 {
+		window = 4
 	}
-	return filepath.Base(newest), lines
+	return filepath.Base(newest), other, logWindow(all, window)
+}
+
+// logWindow picks the slice worth showing: the lines around the last error
+// if the log has one, otherwise the tail.
+func logWindow(lines []string, window int) []string {
+	if len(lines) <= window {
+		return lines
+	}
+	errAt := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if looksLikeFailure(lines[i]) {
+			errAt = i
+			break
+		}
+	}
+	if errAt < 0 {
+		return lines[len(lines)-window:]
+	}
+	// keep the error in view with its context: two thirds above, the rest below
+	lo := errAt - window*2/3
+	if lo < 0 {
+		lo = 0
+	}
+	hi := lo + window
+	if hi > len(lines) {
+		hi, lo = len(lines), len(lines)-window
+	}
+	return lines[lo:hi]
+}
+
+// looksLikeFailure marks the lines the panel is opened to find. Position
+// matters as much as the word: a diagnostic starts with its marker, while a
+// branch named fix/ERROR-handling merely contains one.
+func looksLikeFailure(ln string) bool {
+	t := strings.TrimSpace(ln)
+	for _, p := range []string{"FAIL", "ERROR", "Error", "error:", "panic:", "Traceback", "✗", "✘"} {
+		if strings.HasPrefix(t, p) {
+			return true
+		}
+	}
+	// mid-line, only forms that punctuation makes unambiguous
+	for _, needle := range []string{"Error:", "ERROR:", "error:", "panic:", "exit status", "exit code", " FAILED "} {
+		if strings.Contains(t, needle) {
+			return true
+		}
+	}
+	return false
 }

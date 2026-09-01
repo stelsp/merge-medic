@@ -48,6 +48,16 @@ func main() {
 				}
 			}
 		}
+		// MRTOP_LOG=<iid> opens the log panel on that MR (smoke tests, demos)
+		if iid := os.Getenv("MRTOP_LOG"); iid != "" {
+			for i, mr := range m.snap.mrs {
+				if mr.iid == iid {
+					m.selM, m.focus = i, 0
+				}
+			}
+			m.showLog = true
+			m.refreshLog()
+		}
 		m.pollCI()
 		ciSettle(4 * time.Second)
 		fmt.Println(m.View())
