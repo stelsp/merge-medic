@@ -231,11 +231,15 @@ cd "$WATCH_REPO"
 git fetch --prune --quiet origin || fail "git fetch failed"
 
 # ── defer while humans / other agent sessions are still working ───────────────
-# watch.sh retries a deferred MR on every tick; this check is cheap (fetch +
-# git log, no AI), so the fix lands one tick after the branch goes quiet.
-defer() {
-  ev DEFERRED "$1 — retrying every tick until quiet for ${QUIET_MINUTES:-5}m"
-  date +%s > "$ROOT/state/deferred-$IID"
+# The marker holds the unix time the fix is worth retrying at — not the time
+# it was deferred. The watcher skips the MR until then, so a branch someone
+# is actively pushing to costs one deferred fixer, not one per tick.
+defer() { # message [retry_at]
+  local until_ts="${2:-0}"
+  # unknown cool-off (a dirty checkout): re-check next tick, it is cheap
+  [ "$until_ts" = "0" ] && until_ts="$(date +%s)"
+  ev DEFERRED "$1 — retrying $(date -r "$until_ts" '+%H:%M' 2>/dev/null || date -d "@$until_ts" '+%H:%M' 2>/dev/null || echo soon)"
+  printf '%s' "$until_ts" > "$ROOT/state/deferred-$IID"
   cleanup_wt
   exit 0
 }
@@ -243,7 +247,10 @@ if [ "${QUIET_MINUTES:-0}" -gt 0 ]; then
   head_ts="$(git log -1 --format=%ct "origin/$SRC" 2>/dev/null || echo 0)"
   if [ "$head_ts" -gt 0 ]; then
     age_m=$(( ($(date +%s) - head_ts) / 60 ))
-    [ "$age_m" -lt "$QUIET_MINUTES" ] && defer "branch pushed ${age_m}m ago — someone is working on it"
+    # the branch is quiet QUIET_MINUTES after its last push — retry then
+    [ "$age_m" -lt "$QUIET_MINUTES" ] && \
+      defer "branch pushed ${age_m}m ago — someone is working on it" \
+            "$(( head_ts + QUIET_MINUTES * 60 ))"
   fi
   for ur in ${USER_REPOS:-}; do
     uwt="$(git -C "$ur" worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$SRC" '$1=="worktree"{w=$2} $1=="branch"&&$2==b{print w; exit}')"

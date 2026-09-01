@@ -104,6 +104,29 @@ skip_once() { # iid key detail
   verbose=1
 }
 
+# defer_gate: an MR the fixer deferred stays skipped until the branch has
+# been quiet for QUIET_MINUTES. The marker holds that retry time (not the
+# defer time) — an earlier retry just relaunches a fixer that will defer
+# again, which is what the old 60s grace did on every tick, the poll
+# interval being three times longer. Returns 1 when the MR must be skipped.
+defer_gate() { # iid
+  local iid="$1" retry_at now_ts left
+  [ -f "$STATE/deferred-$iid" ] || return 0
+  retry_at="$(cat "$STATE/deferred-$iid" 2>/dev/null || echo 0)"
+  case "$retry_at" in ''|*[!0-9]*) retry_at=0 ;; esac   # corrupt: retry now
+  now_ts="$(date +%s)"
+  if [ "$now_ts" -lt "$retry_at" ]; then
+    left=$(( (retry_at - now_ts + 59) / 60 ))
+    SK_DEFER=$((SK_DEFER + 1))
+    skip_once "$iid" "defer:$retry_at" "deferred · branch still hot, retrying in ${left}m"
+    return 1
+  fi
+  rm -f "$STATE/deferred-$iid" "$STATE/$MARK-$iid"
+  logc FIX "$iid" "defer expired · branch quiet, eligible again"
+  verbose=1
+  return 0
+}
+
 # Shared edge/dedup logic: called once per MR/PR with normalized fields.
 consider() {
   local iid="$1" src="$2" tgt="$3" title="$4" draft="$5" status="$6" ssha="$7" tsha="$8" ci="${9:-none}" author="${10:-?}" upd="${11:-?}"
@@ -171,20 +194,7 @@ consider() {
     logc FIX "$iid" "approval consumed · mode=fix-approved"; verbose=1
   fi
 
-  # deferred (branch was hot): retry on every tick — the fixer re-checks the
-  # branch cheaply (fetch + git log, no AI) and re-defers if it is still hot,
-  # so the fix lands one tick after the branch has been quiet for
-  # QUIET_MINUTES, instead of a full quiet period after the last defer.
-  # The 60s grace only shields the fixer launched by the previous tick.
-  if [ -f "$STATE/deferred-$iid" ]; then
-    dts="$(cat "$STATE/deferred-$iid")"
-    local dage=$(( $(date +%s) - dts ))
-    if [ "$dage" -lt 60 ]; then
-      SK_DEFER=$((SK_DEFER + 1)); skip_once "$iid" "defer" "defer grace · deferred ${dage}s ago (<60s)"; return 0
-    fi
-    rm -f "$STATE/deferred-$iid" "$STATE/$MARK-$iid"
-    logc FIX "$iid" "defer expired after ${dage}s · eligible again"; verbose=1
-  fi
+  defer_gate "$iid" || return 0
 
   # this exact commit pair was already tried and failed — don't burn tokens again
   if [ -f "$STATE/$MARK-$iid" ] && [ "$(cat "$STATE/$MARK-$iid")" = "$ssha:$tsha" ]; then

@@ -5,7 +5,7 @@ build:
 
 test:
 	go test ./...
-	bash tests/sweep_closed.bats.sh
+	bash tests/watcher_state.sh
 
 clean:
 	rm -f bin/mrtop
