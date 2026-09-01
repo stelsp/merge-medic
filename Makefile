@@ -5,6 +5,7 @@ build:
 
 test:
 	go test ./...
+	bash tests/sweep_closed.bats.sh
 
 clean:
 	rm -f bin/mrtop

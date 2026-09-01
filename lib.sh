@@ -65,6 +65,17 @@ mm_clean() {
     | tr '\n' ' ' | cut -c1-160
 }
 
+# Poll interval in whole seconds, sanitised: config.env is hand-edited, and
+# a stray "3m" or 0 would otherwise poison every interval calculation.
+mm_poll_interval() {
+  local v="${POLL_INTERVAL:-180}"
+  case "$v" in
+    ''|*[!0-9]*) v=180 ;;
+  esac
+  [ "$v" -lt 30 ] && v=30
+  printf '%s' "$v"
+}
+
 # Read KEY out of config file $1 without sourcing it (quotes stripped).
 mm_cfg_get() {
   sed -n "s/^$2=[\"']\{0,1\}\([^\"']*\).*/\1/p" "$1" | head -1

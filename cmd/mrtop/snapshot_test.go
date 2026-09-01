@@ -68,3 +68,31 @@ func TestMRStateDraftDoesNotShiftFields(t *testing.T) {
 		t.Errorf("parser must keep the raw title, got %q", got.title)
 	}
 }
+
+func TestRadarPairsDropClosedMRs(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().Format(time.RFC3339)
+	// only !42 is still open; !101 was merged and its state file is gone
+	writeFile(t, root, filepath.Join("state", "mr-42"),
+		"conflict a1:b2 feat-x main success stelsp "+now+" - feat: open\n")
+	writeFile(t, root, filepath.Join("state", "radar"),
+		"42|101|feat-x|feat-old\n42|7|feat-x|feat-seven\n")
+	s := readSnapshot(root)
+	if len(s.radarPairs) != 0 {
+		t.Errorf("orphan radar pairs survived: %+v", s.radarPairs)
+	}
+}
+
+func TestRadarPairsKeptForOpenMRs(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().Format(time.RFC3339)
+	for _, iid := range []string{"42", "43"} {
+		writeFile(t, root, filepath.Join("state", "mr-"+iid),
+			"conflict a1:b2 feat-"+iid+" main success stelsp "+now+" - feat: open\n")
+	}
+	writeFile(t, root, filepath.Join("state", "radar"), "42|43|feat-42|feat-43\n")
+	s := readSnapshot(root)
+	if len(s.radarPairs) != 1 {
+		t.Errorf("a pair of two open MRs must survive, got %+v", s.radarPairs)
+	}
+}
