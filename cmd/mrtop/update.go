@@ -90,7 +90,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case tickMsg:
-		m.snap = readSnapshot(m.root, m.width)
+		m.snap = readSnapshot(m.root)
 		if m.daemonWantTicks > 0 {
 			m.daemonWantTicks--
 			if m.snap.daemon == m.daemonWant {
@@ -241,7 +241,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				insts := readInstances()
 				if m.selF >= 0 && m.selF < len(insts) {
 					m.root = insts[m.selF]
-					m.snap = readSnapshot(m.root, m.width)
+					m.snap = readSnapshot(m.root)
 					m.screen = 0
 					m.sel, m.selH, m.liveOff = 0, 0, 0
 				}

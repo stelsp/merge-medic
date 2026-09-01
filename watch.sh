@@ -108,8 +108,11 @@ consider() {
   N_OPEN=$((N_OPEN + 1))
   [ "$status" = "conflict" ] && N_CONF=$((N_CONF + 1))
   prev_status="$(cut -d' ' -f1 "$seen_file" 2>/dev/null || echo 'none')"
-  # status shas src tgt ci author updated title — for the dashboard
-  echo "$status $ssha:$tsha $src $tgt $ci $author $upd $title" > "$seen_file"
+  # status shas src tgt ci author updated draft title — for the dashboard.
+  # draft is its own field because only GitLab puts "Draft:" in the title;
+  # GitHub keeps the flag out of band, so a title prefix cannot carry it.
+  local dflag="-"; [ "$draft" = "true" ] && dflag="draft"
+  echo "$status $ssha:$tsha $src $tgt $ci $author $upd $dflag $title" > "$seen_file"
 
   # edge: state change worth logging + notifying
   # only a definite "mergeable" closes a conflict: GitHub answers UNKNOWN
@@ -240,21 +243,37 @@ else
   # except head_pipeline/base_sha — a per-MR detail request happens only when
   # the head SHA moved (or mergeability is still being computed), so a quiet
   # tick is a single API call instead of one per MR.
+  # GitLab reports mergeability as a single detailed_merge_status, which
+  # answers "why can this not merge" — and a blocking reason outranks the
+  # conflict: a draft MR reads "draft_status" even when it is conflicted.
+  # has_conflicts is the authoritative answer, so it decides.
+  gl_status() { # detailed_merge_status has_conflicts
+    if [ "$2" = "true" ]; then echo conflict; return; fi
+    case "$1" in
+      conflict|broken_status) echo conflict ;;
+      checking|unchecked|unknown) echo unknown ;;
+      # draft_status, ci_must_pass, not_approved, discussions_not_resolved:
+      # policy gates, not merge problems — the branches themselves fit
+      *) echo mergeable ;;
+    esac
+  }
   while IFS= read -r row; do
     iid="$(jq -r '.iid' <<<"$row")"
-    status="$(jq -r '.detailed_merge_status // "unknown"' <<<"$row")"
+    status="$(gl_status "$(jq -r '.detailed_merge_status // "unknown"' <<<"$row")" \
+                        "$(jq -r '.has_conflicts // false' <<<"$row")")"
     ssha="$(jq -r '.sha // "?"' <<<"$row")"
     old_ssha="$(cut -d' ' -f2 "$STATE/mr-$iid" 2>/dev/null | cut -d: -f1 || true)"
     old_ci="$(cut -d' ' -f5 "$STATE/mr-$iid" 2>/dev/null || true)"
     old_tsha="$(cut -d' ' -f2 "$STATE/mr-$iid" 2>/dev/null | cut -d: -f2 || true)"
-    if [ "$ssha" != "$old_ssha" ] || [ "$status" = "checking" ] || [ "$status" = "unchecked" ] || [ -z "$old_tsha" ]; then
+    if [ "$ssha" != "$old_ssha" ] || [ "$status" = "unknown" ] || [ -z "$old_tsha" ]; then
       mr="$(glab api "projects/$ENC_PATH/merge_requests/$iid" 2>/dev/null || echo '{}')"
-      status="$(jq -r '.detailed_merge_status // "unknown"' <<<"$mr")"
-      if [ "$status" = "checking" ] || [ "$status" = "unchecked" ]; then
-        sleep 5
+      raw="$(jq -r '.detailed_merge_status // "unknown"' <<<"$mr")"
+      if [ "$raw" = "checking" ] || [ "$raw" = "unchecked" ]; then
+        sleep 5   # GitLab is still computing mergeability — ask once more
         mr="$(glab api "projects/$ENC_PATH/merge_requests/$iid" 2>/dev/null || echo '{}')"
-        status="$(jq -r '.detailed_merge_status // "unknown"' <<<"$mr")"
+        raw="$(jq -r '.detailed_merge_status // "unknown"' <<<"$mr")"
       fi
+      status="$(gl_status "$raw" "$(jq -r '.has_conflicts // false' <<<"$mr")")"
       ssha="$(jq -r '.sha // .diff_refs.head_sha // "?"' <<<"$mr")"
       tsha="$(jq -r '.diff_refs.base_sha // "?"' <<<"$mr")"
       ci="$(jq -r '.head_pipeline.status // "none"' <<<"$mr")"

@@ -26,6 +26,7 @@ func (it item) key() string { return it.iid + "@" + strconv.FormatInt(it.t0, 10)
 type mrState struct {
 	iid, status, src, tgt, ci, author, title string
 	updated                                  int64
+	draft                                    bool // never auto-fixed
 }
 
 type radarPair struct{ a, b, srcA, srcB string }
@@ -163,7 +164,9 @@ func readTokens(root string, day0 int64) (today, total float64, modelLine string
 	return today, total, strings.Join(parts, " · ")
 }
 
-func readSnapshot(root string, width int) snapshot {
+// readSnapshot reads every watcher artifact once per tick. Rendering width
+// is a view concern and deliberately not an input here.
+func readSnapshot(root string) snapshot {
 	var s snapshot
 	now := time.Now()
 	day0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Unix()
@@ -454,6 +457,11 @@ func readSnapshot(root string, width int) snapshot {
 					mr.author = rest[0]
 					mr.updated = t.Unix()
 					rest = rest[2:]
+					// draft flag, written as "draft" or "-" right after it
+					if len(rest) > 0 && (rest[0] == "draft" || rest[0] == "-") {
+						mr.draft = rest[0] == "draft"
+						rest = rest[1:]
+					}
 				}
 			}
 			mr.title = strings.Join(rest, " ")
