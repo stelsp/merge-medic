@@ -27,7 +27,15 @@ STATE="$ROOT/state"; mkdir -p "$STATE"
 # somebody moves a branch.
 MARK="tried"; [ "${DRY_RUN:-1}" = "1" ] && MARK="dry"
 SIGIL="$(mm_ref_sigil)"
-log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG"; }
+# Writes to watch.log, and to the terminal only when there is one. Under
+# launchd/systemd stdout is redirected into logs/launchd.log, which no
+# rotation covers — teeing there duplicated the whole watch.log forever.
+log() {
+  local line; line="$(printf '%s  %s' "$(date '+%Y-%m-%d %H:%M:%S')" "$*")"
+  printf '%s\n' "$line" >> "$LOG"
+  [ -t 1 ] && printf '%s\n' "$line"
+  return 0
+}
 # logc writes a channel-tagged line the dashboard splits into columns:
 #   <ts>  CHANNEL !42 detail        (channel, optional MR id, free detail)
 # Plain log() lines still work and still render — the parser falls back.
@@ -43,6 +51,12 @@ fi
 if [ -f "$LOGDIR/events.log" ] && [ "$(mm_filesize "$LOGDIR/events.log")" -gt 5242880 ]; then
   mv -f "$LOGDIR/events.log" "$LOGDIR/events.log.1"
 fi
+# launchd/systemd stdout and the per-MR fixer logs grow unattended too; a
+# fixer log holds a full VERIFY/TESTS/REGRESSION transcript per run
+for extra in "$LOGDIR/launchd.log" "$LOGDIR"/fixer-*.log; do
+  [ -f "$extra" ] || continue
+  [ "$(mm_filesize "$extra")" -gt 5242880 ] && mv -f "$extra" "$extra.1"
+done
 
 # ── single instance ───────────────────────────────────────────────────────────
 LOCK="$ROOT/.lock"
@@ -407,7 +421,9 @@ radar_scan() {
       git -C "$WATCH_REPO" rev-parse --quiet --verify "origin/$b_src" >/dev/null 2>&1 || continue
       if ! git -C "$WATCH_REPO" merge-tree --write-tree "origin/$a_src" "origin/$b_src" >/dev/null 2>&1; then
         printf '%s|%s|%s|%s\n' "$a_iid" "$b_iid" "$a_src" "$b_src" >> "$out"
-        if ! grep -qF "$a_iid|$b_iid|" "$STATE/radar" 2>/dev/null; then
+        # anchored: an unanchored "2|34|" also matches "12|34|…", which
+        # silently swallowed the alert for a genuinely new pair
+        if ! grep -q "^$a_iid|$b_iid|" "$STATE/radar" 2>/dev/null; then
           logc RADAR "" "$SIGIL$a_iid×$SIGIL$b_iid · $a_src ↔ $b_src conflict with each other — first to merge wins"
           notify "Radar: $SIGIL$a_iid × $SIGIL$b_iid" "$a_src and $b_src conflict with each other"
         fi
