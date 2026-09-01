@@ -231,7 +231,21 @@ if mm_is_github; then
     title="$(jq -r '.title' <<<"$row")"
     draft="$(jq -r '.isDraft' <<<"$row")"
     ssha="$(jq -r '.headRefOid // "?"' <<<"$row")"
-    tsha="$(gh api "repos/$PROJECT_PATH/commits/$tgt" --jq .sha 2>/dev/null || echo '?')"
+    # The dedup key's second half must be the MERGE BASE, not the current
+    # head of the base branch. With the head, every merge into main changed
+    # the key for every open PR at once: all of them looked new, every
+    # conflicted one got a fresh fixer, and a couple of merges could burn a
+    # whole day's AI budget. The merge base only moves when this PR is
+    # rebased or its branch actually diverges. (GitLab has always used
+    # diff_refs.base_sha, which is exactly this.)
+    old_ssha="$(cut -d' ' -f2 "$STATE/mr-$iid" 2>/dev/null | cut -d: -f1 || true)"
+    old_tsha="$(cut -d' ' -f2 "$STATE/mr-$iid" 2>/dev/null | cut -d: -f2 || true)"
+    if [ "$ssha" != "$old_ssha" ] || [ -z "$old_tsha" ] || [ "$old_tsha" = "?" ]; then
+      tsha="$(gh api "repos/$PROJECT_PATH/compare/$tgt...$ssha" \
+                --jq '.merge_base_commit.sha' 2>/dev/null || echo '?')"
+    else
+      tsha="$old_tsha"   # unchanged head: the merge base cannot have moved
+    fi
     ci="$(jq -r '(.statusCheckRollup // []) | map(.conclusion // .state // "") | if length==0 then "none" elif any(.=="FAILURE" or .=="ERROR" or .=="CANCELLED") then "failed" elif all(.=="SUCCESS" or .=="NEUTRAL" or .=="SKIPPED") then "success" else "running" end' <<<"$row")"
     author="$(jq -r '.author.login // "?"' <<<"$row")"
     upd="$(jq -r '.updatedAt // "?"' <<<"$row")"
