@@ -1,6 +1,6 @@
 #!/bin/bash
-# Regression harness for sweep_closed(): it deletes state unattended every
-# tick, so each guard gets an explicit case. Run: bash tests/sweep_closed.bats.sh
+# Regression harness for the watcher's unattended state decisions — the ones
+# that delete files or spend money. Run: bash tests/watcher_state.sh
 # shellcheck disable=SC2034  # the guards below are read by sweep_closed
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -86,7 +86,38 @@ sleep 0.3
 OPEN_IIDS=" "; LIST_COMPLETE=1; LIST_CAP=500
 sweep_closed
 check "live fixer's state kept" "5" "$(count_state '*-7*')"
-kill "$sleeper" 2>/dev/null
+kill "$sleeper" 2>/dev/null; wait "$sleeper" 2>/dev/null
+
+
+# ── defer: the marker holds the retry time, not the defer time ───────────────
+eval "$(sed -n '/^defer_gate() {/,/^}/p' "$ROOT/watch.sh")"
+SK_DEFER=0; verbose=0; MARK=tried
+# shellcheck disable=SC2329,SC2317  # invoked from the extracted defer_gate body
+skip_once() { SKIPPED="$3"; return 0; }
+
+echo
+echo "defer gate:"
+new_state; now=$(date +%s)
+
+SKIPPED=""; echo "$((now + 240))" > "$STATE/deferred-7"
+defer_gate 7 || true
+check "hot branch stays deferred" "1" "$(count_state 'deferred-7')"
+case "$SKIPPED" in *"retrying in 4m"*) ok=1 ;; *) ok=0 ;; esac
+check "skip line names the wait" "1" "$ok"
+
+SKIPPED=""; echo "$((now - 10))" > "$STATE/deferred-8"; : > "$STATE/tried-8"
+defer_gate 8 || true
+check "elapsed cool-off clears the marker" "0" "$(count_state 'deferred-8')"
+check "and clears the dedup mark"          "0" "$(count_state 'tried-8')"
+
+# markers written by an older fixer hold the defer time, always in the past
+SKIPPED=""; echo "$((now - 3600))" > "$STATE/deferred-9"
+defer_gate 9 || true
+check "legacy marker does not wedge" "0" "$(count_state 'deferred-9')"
+
+SKIPPED=""; printf 'garbage' > "$STATE/deferred-10"
+defer_gate 10 || true
+check "corrupt marker does not wedge" "0" "$(count_state 'deferred-10')"
 
 [ "$fails" = "0" ] && { echo "all good"; exit 0; }
 echo "$fails failing case(s)"; exit 1
