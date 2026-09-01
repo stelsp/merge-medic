@@ -92,7 +92,7 @@ kill "$sleeper" 2>/dev/null; wait "$sleeper" 2>/dev/null
 # ── defer: the marker holds the retry time, not the defer time ───────────────
 eval "$(sed -n '/^defer_gate() {/,/^}/p' "$ROOT/watch.sh")"
 SK_DEFER=0; verbose=0; MARK=tried
-# shellcheck disable=SC2329  # invoked from the extracted defer_gate body
+# shellcheck disable=SC2329,SC2317  # invoked from the extracted defer_gate body
 skip_once() { SKIPPED="$3"; return 0; }
 
 echo
