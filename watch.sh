@@ -76,6 +76,9 @@ verbose=0
 # instead of one line per MR per tick (that would be pure noise at 3-minute
 # intervals and would evict real events from the dashboard's log tail)
 SK_DEDUP=0; SK_DRAFT=0; SK_EXCL=0; SK_INCL=0; SK_DEFER=0
+OPEN_IIDS=" "     # every id the forge reported open this tick, space-delimited
+LIST_CAP=500      # hard cap on how many open MRs one tick will enumerate
+LIST_COMPLETE=1   # 0 = the listing was truncated; state must not be swept
 
 # notify_once fires a desktop notification only when the situation changes.
 # A broken token or an exhausted budget persists for hours: without this the
@@ -106,6 +109,7 @@ consider() {
   local iid="$1" src="$2" tgt="$3" title="$4" draft="$5" status="$6" ssha="$7" tsha="$8" ci="${9:-none}" author="${10:-?}" upd="${11:-?}"
   local seen_file="$STATE/mr-$iid" prev_status
   N_OPEN=$((N_OPEN + 1))
+  OPEN_IIDS="$OPEN_IIDS$iid "
   [ "$status" = "conflict" ] && N_CONF=$((N_CONF + 1))
   prev_status="$(cut -d' ' -f1 "$seen_file" 2>/dev/null || echo 'none')"
   # status shas src tgt ci author updated draft title — for the dashboard.
@@ -198,13 +202,17 @@ consider() {
 if mm_is_github; then
   # ── GitHub via gh ───────────────────────────────────────────────────────────
   command -v gh >/dev/null 2>&1 || { logc ERROR "" "PROVIDER=github but gh is not installed"; exit 1; }
-  prs="$(gh pr list --repo "$PROJECT_PATH" --state open --limit 100 \
+  # --limit is a total cap, not a page size: gh paginates up to it. 500 keeps
+  # the whole list in one variable while covering any realistic repo — and
+  # sweep_closed refuses to run if we ever hit the cap (see LIST_COMPLETE).
+  prs="$(gh pr list --repo "$PROJECT_PATH" --state open --limit "$LIST_CAP" \
         --json number,title,headRefName,baseRefName,mergeable,isDraft,headRefOid,statusCheckRollup,author,updatedAt 2>/dev/null || echo '')"
   if [ -z "$prs" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$prs"; then
     logc ERROR "" "could not list PRs — check: gh auth status"
     notify_once forge "prs" "merge-medic: cannot list PRs" "check gh auth status"
     exit 1
   fi
+  [ "$(jq 'length' <<<"$prs")" -ge "$LIST_CAP" ] && LIST_COMPLETE=0
   while IFS= read -r row; do
     iid="$(jq -r '.number' <<<"$row")"
     mergeable="$(jq -r '.mergeable' <<<"$row")"
@@ -233,12 +241,25 @@ else
   # ── GitLab via glab ─────────────────────────────────────────────────────────
   ENC_PATH="${PROJECT_PATH//\//%2F}"
   export GITLAB_HOST
-  mrs="$(glab api "projects/$ENC_PATH/merge_requests?state=opened&per_page=100" 2>/dev/null || echo '')"
-  if [ -z "$mrs" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$mrs"; then
-    logc ERROR "" "could not list MRs — check: glab auth status / GITLAB_TOKEN"
-    notify_once forge "mrs" "merge-medic: cannot list MRs" "check glab auth status"
-    exit 1
-  fi
+  # per_page caps at 100, so walk pages until one comes back short — an
+  # unpaginated listing would make sweep_closed treat page 2 as closed
+  mrs="[]"; page=1
+  while :; do
+    chunk="$(glab api "projects/$ENC_PATH/merge_requests?state=opened&per_page=100&page=$page" 2>/dev/null || echo '')"
+    if [ -z "$chunk" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$chunk"; then
+      if [ "$page" = "1" ]; then
+        logc ERROR "" "could not list MRs — check: glab auth status / GITLAB_TOKEN"
+        notify_once forge "mrs" "merge-medic: cannot list MRs" "check glab auth status"
+        exit 1
+      fi
+      LIST_COMPLETE=0   # a later page failed: the list is partial, do not sweep
+      break
+    fi
+    mrs="$(jq -cs '.[0] + .[1]' <<<"$mrs$chunk")"
+    [ "$(jq 'length' <<<"$chunk")" -lt 100 ] && break
+    page=$((page + 1))
+    if [ "$page" -gt 20 ]; then LIST_COMPLETE=0; break; fi   # 2000 MRs: bail
+  done
   # One request covers the whole tick: the list response carries everything
   # except head_pipeline/base_sha — a per-MR detail request happens only when
   # the head SHA moved (or mergeability is still being computed), so a quiet
@@ -291,12 +312,57 @@ else
   done < <(jq -c '.[]' <<<"$mrs")
 fi
 
+# sweep_closed drops the per-MR state of MRs the forge no longer lists.
+# Nothing else expires it, so a merged MR kept feeding the radar for good:
+# radar_scan reads every state/mr-* file, and closed ones never stopped
+# pairing. Runs only when the listing itself succeeded — a failed API call
+# must never look like "everything closed".
+sweep_closed() {
+  # "Not in the listing" only means "closed" when the listing was COMPLETE.
+  # A truncated page would make every MR behind it look closed, and deleting
+  # its state would discard a human's approval, lose the PLANNED marker that
+  # makes a plan approvable at all, and drop the dedup mark that keeps the
+  # resolver from paying twice for the same commit pair.
+  if [ "$LIST_COMPLETE" != "1" ]; then
+    logc WARN "" "listing truncated at $LIST_CAP — skipping the closed-MR sweep"
+    return 0
+  fi
+  # A grace period on top of the membership test: a state file the previous
+  # tick refreshed is spared even when this tick did not list it. That way a
+  # single empty-but-successful listing (a token that lost its scope answers
+  # [] rather than failing) cannot wipe every MR's state in one go — it takes
+  # two consecutive ticks of the MR being genuinely absent.
+  local grace_min fresh
+  grace_min=$(( ($(mm_poll_interval) * 2 + 59) / 60 ))
+  fresh="$(find "$STATE" -maxdepth 1 -name 'mr-*' -mmin "-$grace_min" 2>/dev/null | tr '\n' ' ')"
+  local f iid gone=0
+  for f in "$STATE"/mr-*; do
+    [ -f "$f" ] || continue
+    iid="${f##*/mr-}"
+    case "$OPEN_IIDS" in *" $iid "*) continue ;; esac
+    case " $fresh" in *" $f "*) continue ;; esac
+    # a detached fixer outlives its tick, and its progress file is what the
+    # run archive is copied from — leave a live run entirely alone
+    if pgrep -f "fix-mr.sh $iid " >/dev/null 2>&1; then continue; fi
+    rm -f "$STATE/mr-$iid" "$STATE/skip-$iid" "$STATE/deferred-$iid" \
+          "$STATE/tried-$iid" "$STATE/dry-$iid" "$STATE/approve-$iid" \
+          "$STATE/progress-$iid.log" "$STATE/plan-$iid.md" \
+          "$STATE/esc-$iid.md" "$STATE/answers-$iid.md"
+    gone=$((gone + 1))
+  done
+  [ "$gone" -gt 0 ] && logc TICK "" "$gone closed MR(s) swept from state"
+  return 0
+}
+sweep_closed
+
 # ── conflict radar: pairwise merge-tree between open MRs sharing a target ────
 # "Your MR will conflict with !X when either merges" — detected before it
 # hurts, for free (in-memory merge-tree, zero tokens, zero API calls).
 radar_scan() {
   [ "${RADAR:-1}" = "1" ] || return 0
   local out="$STATE/radar.tmp" list="" f iid status shas src tgt rest
+  # closed MRs are already gone from state (sweep_closed runs first) and the
+  # dashboard drops pairs naming an MR it cannot see — no mtime guessing here
   : > "$out"
   for f in "$STATE"/mr-*; do
     [ -f "$f" ] || continue
@@ -339,6 +405,7 @@ radar_scan() {
 radar_scan
 
 rm -f "$STATE/notified-forge"   # the forge answered — a later outage may notify
+
 
 # one line per tick, carrying why nothing (or something) happened
 tick_line() {

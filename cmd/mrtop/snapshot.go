@@ -473,6 +473,16 @@ func readSnapshot(root string) snapshot {
 	for _, mr := range s.mrs {
 		openNow[mr.iid] = true
 	}
+	// a radar pair naming an MR that is no longer open is an orphan: the
+	// watcher may not have swept its state yet, and a merged MR must not keep
+	// warning about a clash that cannot happen any more
+	kept := s.radarPairs[:0]
+	for _, p := range s.radarPairs {
+		if openNow[p.a] && openNow[p.b] {
+			kept = append(kept, p)
+		}
+	}
+	s.radarPairs = kept
 	for iid := range s.waiters {
 		if !openNow[iid] {
 			delete(s.waiters, iid)
