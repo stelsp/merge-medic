@@ -21,7 +21,8 @@ check() { # description expected actual
 # shellcheck source=lib.sh disable=SC1091
 source "$ROOT/lib.sh"
 eval "$(sed -n '/^sweep_closed() {/,/^}/p' "$ROOT/watch.sh")"
-# shellcheck disable=SC2329  # called from the extracted sweep_closed body
+# shellcheck disable=SC2329,SC2317  # called from the extracted sweep_closed body
+#                                    (the two shellcheck versions disagree on the code)
 logc() { :; }
 
 # state files are seeded "now", so the grace period would spare them all;
