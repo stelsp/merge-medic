@@ -38,7 +38,7 @@ func main() {
 			m.screen = sc
 		}
 
-		m.snap = readSnapshot(m.root, m.width)
+		m.snap = readSnapshot(m.root)
 		// MRTOP_EXPAND=<iid> renders that MR expanded (smoke tests, demos)
 		if iid := os.Getenv("MRTOP_EXPAND"); iid != "" {
 			m.expandedMR[iid] = true

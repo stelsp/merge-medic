@@ -427,8 +427,10 @@ func (m model) View() string {
 			}
 			title := mr.title
 			tstyle := lipgloss.NewStyle()
-			if d, ok := strings.CutPrefix(title, "Draft: "); ok {
-				title = d
+			// GitLab spells drafts into the title, GitHub does not — the mark
+			// comes from the flag, the prefix is only trimmed for looks
+			title = strings.TrimPrefix(title, "Draft: ")
+			if mr.draft {
 				tstyle = dim
 				if gear == "  " {
 					gear = dim.Render("d ")
