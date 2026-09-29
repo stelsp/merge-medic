@@ -336,7 +336,7 @@ else
     n="$(printf '%s\n' "$conflicts" | grep -c . || true)"
     if [ -z "$conflicts" ]; then
       # everything was mechanical: commit and go straight to the gates
-      merge_msg="$(cat "$(git rev-parse --git-dir)/MERGE_MSG" 2>/dev/null | grep -v '^#' | sed '/^$/d')"
+      merge_msg="$(grep -v '^#' "$(git rev-parse --git-dir)/MERGE_MSG" 2>/dev/null | sed '/^$/d')"
       [ -n "$merge_msg" ] || merge_msg="chore: merge origin/$TGT into $SRC (${SIGIL}$IID)"
       git commit -m "$merge_msg" -m "Merge-Medic-Run: $IID" >/dev/null
       resolve_mode="rules"
@@ -511,7 +511,7 @@ $(cat "$ROOT/state/esc-$IID.md")
   # capture the AI's summary BEFORE staging so it never lands in the commit
   [ -f "$SUMFILE" ] && summary="$(cat "$SUMFILE")" && rm -f "$SUMFILE"
   git add -A
-  merge_msg="$(cat "$(git rev-parse --git-dir)/MERGE_MSG" 2>/dev/null | grep -v '^#' | sed '/^$/d')"
+  merge_msg="$(grep -v '^#' "$(git rev-parse --git-dir)/MERGE_MSG" 2>/dev/null | sed '/^$/d')"
   [ -n "$merge_msg" ] || merge_msg="chore: merge origin/$TGT into $SRC (${SIGIL}$IID)"
   git commit -m "$merge_msg" -m "Merge-Medic-Run: $IID" >/dev/null
   ai_ran=1
