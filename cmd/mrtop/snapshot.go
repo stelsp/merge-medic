@@ -182,7 +182,7 @@ func readSnapshot(root string) snapshot {
 	if readConfigVal(root, "PROVIDER", "gitlab") == "github" {
 		mrSigil = "#" // events.log stores bare ids; the rail supplies the sigil
 	}
-	s.pushMode = readConfigVal(root, "PUSH_MODE", "direct")
+	s.pushMode = readConfigVal(root, "PUSH_MODE", "mr")
 	s.resolver = readConfigVal(root, "RESOLVER", "claude")
 	if s.resolver == "claude" {
 		s.model = readConfigVal(root, "CLAUDE_MODEL", "opus")
