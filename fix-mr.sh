@@ -310,6 +310,42 @@ else
     done
   done
 
+  # ── deterministic rules: close what needs no judgement, for free ───────────
+  # Stamp lines every branch rewrites ("> verified: <sha>" and friends)
+  # conflict constantly and carry no decision. Resolving them here costs no
+  # tokens, no budget slot and no waiting, and shrinks what the model is
+  # shown when something real is left behind.
+  rules_only=0
+  if [ -n "${RULES_KEEP_OURS:-}" ]; then
+    rules_left=""; rules_done=0; rc=0
+    for f in $conflicts; do
+      awk -v keep_ours="${RULES_KEEP_OURS}" -f "$ROOT/rules.awk" "$f" > "$f.mm-rules" 2>/dev/null || rc=$?
+      case "$rc" in
+        0) mv "$f.mm-rules" "$f"; git add -- "$f"; rules_done=$((rules_done + 1)) ;;
+        1) mv "$f.mm-rules" "$f"                       # partly decided: fewer hunks for the model
+           rules_left="$rules_left$f
+" ;;
+        *) rm -f "$f.mm-rules"                         # unparsable: leave the file exactly as git left it
+           rules_left="$rules_left$f
+" ;;
+      esac
+      rc=0
+    done
+    [ "$rules_done" -gt 0 ] && ev RULES "ok · $rules_done of $n file(s) decided by rules, no model"
+    conflicts="$(printf '%s' "$rules_left" | sed '/^$/d')"
+    n="$(printf '%s\n' "$conflicts" | grep -c . || true)"
+    if [ -z "$conflicts" ]; then
+      # everything was mechanical: commit and go straight to the gates
+      merge_msg="$(cat "$(git rev-parse --git-dir)/MERGE_MSG" 2>/dev/null | grep -v '^#' | sed '/^$/d')"
+      [ -n "$merge_msg" ] || merge_msg="chore: merge origin/$TGT into $SRC (${SIGIL}$IID)"
+      git commit -m "$merge_msg" -m "Merge-Medic-Run: $IID" >/dev/null
+      resolve_mode="rules"
+      rules_only=1
+    fi
+  fi
+
+  if [ "$rules_only" = "0" ]; then
+
   # ── AI budget (atomic via mkdir lock) ───────────────────────────────────────
   today="$(date '+%Y-%m-%d')"; BUDGET_FILE="$ROOT/state/budget-$today"
   BLOCK="$ROOT/state/.budget.lock"
@@ -475,11 +511,14 @@ $(cat "$ROOT/state/esc-$IID.md")
   # capture the AI's summary BEFORE staging so it never lands in the commit
   [ -f "$SUMFILE" ] && summary="$(cat "$SUMFILE")" && rm -f "$SUMFILE"
   git add -A
-  git commit --no-edit >/dev/null 2>&1 \
-    || git commit -m "chore: merge origin/$TGT into $SRC (${SIGIL}$IID)" >/dev/null
+  merge_msg="$(cat "$(git rev-parse --git-dir)/MERGE_MSG" 2>/dev/null | grep -v '^#' | sed '/^$/d')"
+  [ -n "$merge_msg" ] || merge_msg="chore: merge origin/$TGT into $SRC (${SIGIL}$IID)"
+  git commit -m "$merge_msg" -m "Merge-Medic-Run: $IID" >/dev/null
   ai_ran=1
   resolve_mode="ai"
 fi
+
+fi   # rules_only: everything below runs for both paths
 
 if [ -n "${VERIFY_CMD:-}" ]; then
   run_gate VERIFY "$VERIFY_CMD"

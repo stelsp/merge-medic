@@ -13,9 +13,11 @@ jobs:
       - name: shellcheck
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
-          shellcheck watch.sh fix-mr.sh lib.sh bin/mrwatch install.sh uninstall.sh get.sh docs/demo-state.sh tests/watcher_state.sh
+          shellcheck watch.sh fix-mr.sh lib.sh bin/mrwatch install.sh uninstall.sh get.sh docs/demo-state.sh tests/watcher_state.sh tests/rules.sh
       - name: shell tests
-        run: bash tests/watcher_state.sh
+        run: |
+          bash tests/watcher_state.sh
+          bash tests/rules.sh
       - name: bash -n
         run: |
           for f in watch.sh fix-mr.sh lib.sh bin/mrwatch install.sh uninstall.sh get.sh docs/demo-state.sh; do

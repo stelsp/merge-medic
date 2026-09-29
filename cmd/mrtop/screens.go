@@ -19,7 +19,7 @@ func (m model) runsDetailView(nDays int) string {
 	s := m.snap
 	var b strings.Builder
 	b.WriteString(m.renderBanner())
-	type day struct{ done, fail, esc, clean, ai int }
+	type day struct{ done, fail, esc, clean, ai, rules int }
 	days := make([]day, nDays)
 	now := time.Now()
 	day0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Unix()
@@ -59,6 +59,9 @@ func (m model) runsDetailView(nDays int) string {
 				if len(p) > 3 && p[3] == "ai" {
 					d.ai++
 				}
+				if len(p) > 3 && p[3] == "rules" {
+					d.rules++
+				}
 			case "FAIL":
 				d.fail++
 			case "ESCALATED":
@@ -88,7 +91,7 @@ func (m model) runsDetailView(nDays int) string {
 	bw := m.width
 	barW := min(48, max(18, bw-52))
 	var rows []string
-	rows = append(rows, dim.Render("  day    activity"+strings.Repeat(" ", barW-6)+"✓   ✗   ⚑   clean/ai"))
+	rows = append(rows, dim.Render("  day    activity"+strings.Repeat(" ", barW-6)+"✓   ✗   ⚑   clean/ai/rules"))
 	for i, d := range days {
 		date := time.Unix(day0+86400-int64(nDays-i)*86400, 0).Format("02.01")
 		total := d.done + d.fail + d.esc
@@ -104,7 +107,7 @@ func (m model) runsDetailView(nDays int) string {
 			dim.Render(date), padTo(bar, barW+2),
 			green.Render(fmt.Sprintf("%3d", d.done)), red.Render(fmt.Sprintf("%3d", d.fail)),
 			yellow.Render(fmt.Sprintf("%3d", d.esc)),
-			dim.Render(fmt.Sprintf("%d/%d", d.clean, d.ai))))
+			dim.Render(fmt.Sprintf("%d/%d/%d", d.clean, d.ai, d.rules))))
 	}
 	rows = append(rows, "",
 		fmt.Sprintf("  all time: %s %s %s · %d clean merges · %d AI resolutions",
