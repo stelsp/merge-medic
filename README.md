@@ -36,10 +36,10 @@ instead of guessed. Your branch is never rebased or force-pushed — the fix is
 always a `chore: merge origin/<target> into <branch>` commit.
 
 Not a Claude shop? The resolver is pluggable — **any model** via
-[aider](https://aider.chat) (`RESOLVER=aider`) or your own command. Don't
-want a bot pushing into your branch at all? `PUSH_MODE=mr` delivers every
-fix as **its own MR into your branch** — you review the diff and press
-merge; your branch is never touched.
+[aider](https://aider.chat) (`RESOLVER=aider`) or your own command. By
+default the bot never touches your branch: every fix arrives as **its own
+MR into it**, you review the diff and press merge. Set `PUSH_MODE=direct`
+when you would rather it just pushed the merge commit.
 
 ## Why this exists
 
@@ -239,7 +239,7 @@ Everything lives in `config.env` (gitignored; seeded from
 | `TEST_CMD_TEMPLATE` | focused tests, `{files}` = conflicted paths |
 | `REGRESSION_CMD` / `REGRESSION_WHEN` | full suite gate: `ai` (default) / `always` / `never` |
 | `RESOLVER` | `claude` (default) / `aider` (any model via API keys: `RESOLVER_MODEL`) / `custom` (`RESOLVER_CMD`) |
-| `PUSH_MODE` | `direct` (default: merge commit pushed into the source branch) / `mr` (your branch is never touched — the resolution is opened as its own MR/PR into it, you review and merge) |
+| `PUSH_MODE` | `mr` (default: your branch is never touched — the resolution is opened as its own MR/PR into it, you review and merge) / `direct` (the merge commit is pushed into the source branch) |
 | `TRUSTED_AUTHORS` | usernames whose plan comments the approved run obeys (default: the MR author only) |
 | `RESOLVE_POLICY_FILE` | project-specific resolution rules appended to the prompt |
 | `AUTO_BRANCHES` | source-branch globs fixed fully automatically (default `feat-*`); any other source gets the semi-auto flow: plan → MR comment → human approve (`a` in the dashboard) → fix that reads your comments |
@@ -268,8 +268,8 @@ launchd / systemd user timer (every N s)
         ├─ resolver      claude / aider (any model) / custom — resolve-only
         │                prompt + intent context + policy file
         ├─ gates         VERIFY_CMD → TEST_CMD_TEMPLATE → REGRESSION_CMD
-        ├─ deliver       push the merge commit (PUSH_MODE=direct) or open a
-        │                resolution MR into the branch (PUSH_MODE=mr)
+        ├─ deliver       open a resolution MR into the branch (PUSH_MODE=mr,
+        │                the default) or push the merge commit (direct)
         └─ MR comment    per-file reasoning (POST_RESOLUTION_NOTE)
 
 state/progress-<iid>.log  ←  phase events  ←  mrtop / mrwatch top

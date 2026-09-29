@@ -552,7 +552,7 @@ fi
 
 # ── push: direct (into the source branch) or via a resolution MR/PR ───────────
 res_link=""
-if [ "${PUSH_MODE:-direct}" = "mr" ]; then
+if [ "${PUSH_MODE:-mr}" != "direct" ]; then
   FIXBR="merge-medic/fix-$IID-$(date +%s)"
   ev PUSH "mr · resolution branch $FIXBR (your branch stays untouched)"
   git push origin "HEAD:refs/heads/$FIXBR" >/dev/null 2>&1 || fail "push of $FIXBR rejected"
