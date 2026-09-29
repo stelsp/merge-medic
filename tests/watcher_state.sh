@@ -119,5 +119,49 @@ SKIPPED=""; printf 'garbage' > "$STATE/deferred-10"
 defer_gate 10 || true
 check "corrupt marker does not wedge" "0" "$(count_state 'deferred-10')"
 
+# ── agent coexistence: worktree presence and our own pushes ─────────────────
+eval "$(sed -n '/^ours_at_head() {/,/^}/p' "$ROOT/fix-mr.sh")"
+eval "$(sed -n '/^branch_worktree() {/,/^}/p' "$ROOT/fix-mr.sh")"
+
+echo
+echo "agent coexistence:"
+# macOS hands out /var/... from mktemp but git reports the real /private/var
+AGENT_REPO="$(cd "$(mktemp -d)" && pwd -P)/repo"
+git init -q "$AGENT_REPO"
+git -C "$AGENT_REPO" config user.email t@t
+git -C "$AGENT_REPO" config user.name t
+echo base > "$AGENT_REPO/f.txt"
+git -C "$AGENT_REPO" add -A
+git -C "$AGENT_REPO" commit -qm base
+git -C "$AGENT_REPO" branch feat-1
+git -C "$AGENT_REPO" worktree add -q "$AGENT_REPO/.worktrees/feat-1" feat-1
+
+SRC=feat-1
+check "registered worktree is found" "$AGENT_REPO/.worktrees/feat-1" "$(branch_worktree "$AGENT_REPO")"
+
+SRC=feat-nope
+check "a branch with no worktree yields nothing" "" "$(branch_worktree "$AGENT_REPO")"
+
+# a worktree the repo does not know about, at the conventional path
+mkdir -p "$AGENT_REPO/.worktrees/feat-detached"
+SRC=feat-detached
+check "unregistered worktree found by path" "$AGENT_REPO/.worktrees/feat-detached" "$(branch_worktree "$AGENT_REPO")"
+
+# our own merge commit must not read as somebody working
+SRC=feat-1
+wt="$AGENT_REPO/.worktrees/feat-1"
+echo mine > "$wt/m.txt"
+git -C "$wt" add -A
+git -C "$wt" commit -q -m "chore: merge origin/dev into feat-1" -m "Merge-Medic-Run: 42"
+git -C "$AGENT_REPO" branch -f "origin/$SRC" feat-1 2>/dev/null || true
+if git -C "$wt" log -1 --format='%B' | grep -q '^Merge-Medic-Run: '; then ours=1; else ours=0; fi
+check "our own commit carries the trailer" "1" "$ours"
+
+echo agent > "$wt/a.txt"
+git -C "$wt" add -A
+git -C "$wt" commit -q -m "feat: an agent's own commit"
+if git -C "$wt" log -1 --format='%B' | grep -q '^Merge-Medic-Run: '; then ours=1; else ours=0; fi
+check "an agent's commit does not"        "0" "$ours"
+
 [ "$fails" = "0" ] && { echo "all good"; exit 0; }
 echo "$fails failing case(s)"; exit 1

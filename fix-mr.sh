@@ -243,19 +243,57 @@ defer() { # message [retry_at]
   cleanup_wt
   exit 0
 }
-if [ "${QUIET_MINUTES:-0}" -gt 0 ]; then
-  head_ts="$(git log -1 --format=%ct "origin/$SRC" 2>/dev/null || echo 0)"
-  if [ "$head_ts" -gt 0 ]; then
-    age_m=$(( ($(date +%s) - head_ts) / 60 ))
-    # the branch is quiet QUIET_MINUTES after its last push — retry then
-    [ "$age_m" -lt "$QUIET_MINUTES" ] && \
-      defer "branch pushed ${age_m}m ago — someone is working on it" \
-            "$(( head_ts + QUIET_MINUTES * 60 ))"
+# ours_at_head: the tip of the branch is a commit this bot made. A push of
+# ours must never read as "an agent is working here" — otherwise the fixer
+# defers itself for QUIET_MINUTES after every successful resolution.
+ours_at_head() {
+  git log -1 --format='%B' "origin/$SRC" 2>/dev/null | grep -q '^Merge-Medic-Run: '
+}
+
+# branch_worktree: where a coding agent would be working on this branch.
+# Agents get one worktree per branch (<repo>/.worktrees/<branch>), so the
+# registered list is the reliable lookup, with the conventional path as a
+# fallback for worktrees this repo does not know about.
+branch_worktree() { # user_repo
+  local ur="$1" wt
+  wt="$(git -C "$ur" worktree list --porcelain 2>/dev/null \
+        | awk -v b="refs/heads/$SRC" '$1=="worktree"{w=$2} $1=="branch"&&$2==b{print w; exit}')"
+  if [ -z "$wt" ] && [ -d "$ur/.worktrees/$SRC" ]; then
+    wt="$ur/.worktrees/$SRC"
   fi
+  printf '%s' "$wt"
+}
+
+if [ "${QUIET_MINUTES:-0}" -gt 0 ]; then
+  if ours_at_head; then
+    ev CONTEXT "info · branch tip is our own merge — not treating it as activity"
+  else
+    head_ts="$(git log -1 --format=%ct "origin/$SRC" 2>/dev/null || echo 0)"
+    if [ "$head_ts" -gt 0 ]; then
+      age_m=$(( ($(date +%s) - head_ts) / 60 ))
+      # the branch is quiet QUIET_MINUTES after its last push — retry then
+      [ "$age_m" -lt "$QUIET_MINUTES" ] && \
+        defer "branch pushed ${age_m}m ago — someone is working on it" \
+              "$(( head_ts + QUIET_MINUTES * 60 ))"
+    fi
+  fi
+
   for ur in ${USER_REPOS:-}; do
-    uwt="$(git -C "$ur" worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$SRC" '$1=="worktree"{w=$2} $1=="branch"&&$2==b{print w; exit}')"
-    if [ -n "$uwt" ] && [ -n "$(git -C "$uwt" status --porcelain 2>/dev/null | head -1)" ]; then
+    uwt="$(branch_worktree "$ur")"
+    [ -n "$uwt" ] && [ -d "$uwt" ] || continue
+    # uncommitted work is the strongest "hands off" signal there is
+    if [ -n "$(git -C "$uwt" status --porcelain 2>/dev/null | head -1)" ]; then
       defer "uncommitted work in $uwt"
+    fi
+    # a local commit the agent has not pushed yet is just as much activity,
+    # and origin/<branch> cannot see it
+    local_ts="$(git -C "$uwt" log -1 --format=%ct 2>/dev/null || echo 0)"
+    if [ "$local_ts" -gt 0 ] && \
+       ! git -C "$uwt" log -1 --format='%B' 2>/dev/null | grep -q '^Merge-Medic-Run: '; then
+      local_age=$(( ($(date +%s) - local_ts) / 60 ))
+      [ "$local_age" -lt "${QUIET_MINUTES:-0}" ] && \
+        defer "unpushed commit ${local_age}m ago in $uwt" \
+              "$(( local_ts + QUIET_MINUTES * 60 ))"
     fi
   done
 fi
@@ -475,8 +513,14 @@ $(cat "$ROOT/state/esc-$IID.md")
   # capture the AI's summary BEFORE staging so it never lands in the commit
   [ -f "$SUMFILE" ] && summary="$(cat "$SUMFILE")" && rm -f "$SUMFILE"
   git add -A
-  git commit --no-edit >/dev/null 2>&1 \
-    || git commit -m "chore: merge origin/$TGT into $SRC (${SIGIL}$IID)" >/dev/null
+  # The trailer is how a later tick recognises this commit as ours: without
+  # it a bot push and an agent push are indistinguishable, and the fixer
+  # defers itself for QUIET_MINUTES after every resolution it lands.
+  # git prepared the merge message in MERGE_MSG; keep it and append.
+  merge_msg="$(cat "$(git rev-parse --git-dir)/MERGE_MSG" 2>/dev/null \
+               | grep -v '^#' | sed '/^$/d')"
+  [ -n "$merge_msg" ] || merge_msg="chore: merge origin/$TGT into $SRC (${SIGIL}$IID)"
+  git commit -m "$merge_msg" -m "Merge-Medic-Run: $IID" >/dev/null
   ai_ran=1
   resolve_mode="ai"
 fi
