@@ -239,6 +239,7 @@ Everything lives in `config.env` (gitignored; seeded from
 | `TEST_CMD_TEMPLATE` | focused tests, `{files}` = conflicted paths |
 | `REGRESSION_CMD` / `REGRESSION_WHEN` | full suite gate: `ai` (default) / `always` / `never` |
 | `RESOLVER` | `claude` (default) / `aider` (any model via API keys: `RESOLVER_MODEL`) / `custom` (`RESOLVER_CMD`) |
+| `RULES_KEEP_OURS` | ERE for lines that carry no decision (a `> verified: <sha>` stamp every branch rewrites). A hunk differing only in such lines is resolved in your favour before the model is called — no tokens, no budget slot. Anything else in the hunk sends it to the resolver untouched. |
 | `PUSH_MODE` | `mr` (default: your branch is never touched — the resolution is opened as its own MR/PR into it, you review and merge) / `direct` (the merge commit is pushed into the source branch) |
 | `TRUSTED_AUTHORS` | usernames whose plan comments the approved run obeys (default: the MR author only) |
 | `RESOLVE_POLICY_FILE` | project-specific resolution rules appended to the prompt |
@@ -261,9 +262,12 @@ launchd / systemd user timer (every N s)
   └─ watch.sh            bash + glab/gh — free polling, edge detection,
      │                   SHA dedup, budget guard, conflict radar, notifications
      └─ fix-mr.sh ×N     one per conflicted MR (PARALLEL_FIXERS cap)
-        ├─ defer         branch pushed < QUIET_MINUTES ago? → retry when quiet
+        ├─ defer         branch busy? (a push, or an agent's worktree with
+        │                uncommitted or unpushed work) → retry when quiet
         ├─ git worktree  isolated per MR
         ├─ git merge     zdiff3 markers; clean? → done, 0 tokens
+        ├─ rules         stamp-line conflicts decided deterministically
+        │                (RULES_KEEP_OURS) — still 0 tokens
         ├─ escalation    protected paths / incompatible changes → human
         ├─ resolver      claude / aider (any model) / custom — resolve-only
         │                prompt + intent context + policy file
