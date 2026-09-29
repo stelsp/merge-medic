@@ -280,7 +280,7 @@ if [ "${QUIET_MINUTES:-0}" -gt 0 ]; then
 
   for ur in ${USER_REPOS:-}; do
     uwt="$(branch_worktree "$ur")"
-    [ -n "$uwt" ] && [ -d "$uwt" ] || continue
+    if [ -z "$uwt" ] || [ ! -d "$uwt" ]; then continue; fi
     # uncommitted work is the strongest "hands off" signal there is
     if [ -n "$(git -C "$uwt" status --porcelain 2>/dev/null | head -1)" ]; then
       defer "uncommitted work in $uwt"
@@ -517,8 +517,7 @@ $(cat "$ROOT/state/esc-$IID.md")
   # it a bot push and an agent push are indistinguishable, and the fixer
   # defers itself for QUIET_MINUTES after every resolution it lands.
   # git prepared the merge message in MERGE_MSG; keep it and append.
-  merge_msg="$(cat "$(git rev-parse --git-dir)/MERGE_MSG" 2>/dev/null \
-               | grep -v '^#' | sed '/^$/d')"
+  merge_msg="$(grep -v '^#' "$(git rev-parse --git-dir)/MERGE_MSG" 2>/dev/null | sed '/^$/d')"
   [ -n "$merge_msg" ] || merge_msg="chore: merge origin/$TGT into $SRC (${SIGIL}$IID)"
   git commit -m "$merge_msg" -m "Merge-Medic-Run: $IID" >/dev/null
   ai_ran=1
