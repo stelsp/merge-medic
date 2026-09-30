@@ -521,7 +521,7 @@ done <<<"$targets"
 # Each fixer decides on its own whether AI is needed (only on real conflict
 # markers), accounts the AI budget, and writes phases to
 # state/progress-<iid>.log for `mrwatch top`.
-running_fixers() { pgrep -f "$ROOT/fix-mr.sh" 2>/dev/null | wc -l | tr -d ' '; }
+running_fixers() { mm_fixer_count "$ROOT"; }
 
 notify "Conflicts: $count MR(s)" "Launching fixers (mrwatch top for progress)"
 launched=0

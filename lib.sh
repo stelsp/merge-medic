@@ -72,6 +72,57 @@ mm_src_is_auto() {
   mm_glob_match "$1" "${AUTO_BRANCHES:-feat-*}" >/dev/null
 }
 
+# mm_kill_tree <pid> <signal> — signal a process and everything it started,
+# children first, so none is re-parented out of reach halfway through.
+mm_kill_tree() {
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do mm_kill_tree "$c" "$2"; done
+  kill "-$2" "$1" 2>/dev/null || true
+}
+
+# mm_timeout <seconds> <command...> — run the command (a function works too);
+# if it is still running after <seconds>, stop it and everything it started:
+# TERM, then KILL 5s later. Returns the command's status, or 124 on timeout
+# (GNU timeout's convention). Empty or 0 seconds = no limit.
+# macOS ships no timeout(1), and timeout(1) could not run a shell function.
+# The command runs in the background, so its stdin is /dev/null — nothing a
+# fixer runs unattended should be waiting for input anyway.
+mm_timeout() {
+  local secs="$1" fired pid wd rc=0
+  shift
+  case "$secs" in ''|*[!0-9]*) secs=0 ;; esac
+  if [ "$secs" -eq 0 ]; then "$@"; return; fi
+  fired="$(mktemp "${TMPDIR:-/tmp}/mm-timeout.XXXXXX")" && rm -f "$fired"
+  "$@" &
+  pid=$!
+  # the watchdog must not hold the caller's stdout: inside $( ) that would
+  # keep the substitution waiting for the full timeout
+  ( sleep "$secs"; : > "$fired"
+    mm_kill_tree "$pid" TERM; sleep 5; mm_kill_tree "$pid" KILL ) >/dev/null 2>&1 &
+  wd=$!
+  # (2>/dev/null: bash's own "Terminated" job notice, not the command's output)
+  wait "$pid" 2>/dev/null || rc=$?
+  mm_kill_tree "$wd" TERM
+  wait "$wd" 2>/dev/null || true
+  if [ -e "$fired" ]; then rm -f "$fired"; return 124; fi
+  return "$rc"
+}
+
+# mm_fixer_count <root> — how many fixers are running. A fixer forks while it
+# works (a gate's subshell, mm_timeout's job and watchdog), and every fork
+# carries the fixer's command line, so counting pgrep matches would count one
+# fixer several times. Only processes whose parent is not itself a fixer are
+# counted.
+mm_fixer_count() {
+  local pids p pp n=0
+  pids=" $(pgrep -f "$1/fix-mr.sh" 2>/dev/null | tr '\n' ' ')"
+  for p in $pids; do
+    pp="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+    case "$pids" in *" $pp "*) ;; *) n=$((n + 1)) ;; esac
+  done
+  printf '%s' "$n"
+}
+
 # Squeeze foreign text (git stderr, test output) into one safe log detail:
 # no ANSI, no control bytes, single line, capped — an uncapped detail would
 # evict real events from the dashboard's fixed-size log tail.

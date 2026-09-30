@@ -102,6 +102,45 @@ if markers_left conflict.txt; then ml=1; else ml=0; fi
 check "a clean resolution has no leftovers" "0" "$ml"
 cd "$ROOT" || exit 1
 
+# ── deadlines: nothing a fixer starts may run forever ───────────────────────
+echo
+echo "deadlines:"
+out="$(mm_timeout 5 sh -c 'echo hi; exit 3')"; rc=$?
+check "a quick command keeps its output"      "hi" "$out"
+check "…and its exit status"                  "3" "$rc"
+
+# shellcheck disable=SC2329,SC2317  # invoked through mm_timeout
+#                                    (the two shellcheck versions disagree on the code)
+fn_under_test() { echo "from a function"; return 7; }
+out="$(mm_timeout 5 fn_under_test)"; rc=$?
+check "a shell function runs under a deadline" "from a function/7" "$out/$rc"
+
+SECONDS=0
+out="$(mm_timeout 30 echo fast)"
+check "a finished command does not wait out the deadline" "fast/1" "$out/$(( SECONDS < 3 ? 1 : 0 ))"
+
+# a stuck command AND what it spawned are both stopped
+mm_timeout 1 bash -c 'sleep 4711 & sleep 4711; wait'; rc=$?
+check "a stuck command times out with 124"    "124" "$rc"
+sleep 0.3
+if pgrep -f 'sleep 4711' >/dev/null 2>&1; then left=1; else left=0; fi
+check "…and nothing it started is left behind" "0" "$left"
+pkill -f 'sleep 4711' 2>/dev/null
+
+mm_timeout 0 true; rc=$?
+check "0 seconds means no limit"               "0" "$rc"
+
+# ── counting fixers: one fixer, however many times it has forked ───────────
+echo
+echo "fixer count:"
+FAKE_ROOT="$TMP/mm-root"
+bash -c "exec -a 'bash $FAKE_ROOT/fix-mr.sh 7 feat-7 main' bash -c '( sleep 3 ) & ( sleep 3 ) & wait'" 2>/dev/null &
+fake=$!
+sleep 0.5
+check "a fixer with two subshells counts once" "1" "$(mm_fixer_count "$FAKE_ROOT")"
+mm_kill_tree "$fake" TERM; wait "$fake" 2>/dev/null
+check "no fixer, no count"                     "0" "$(mm_fixer_count "$FAKE_ROOT")"
+
 rm -rf "$TMP"
 [ "$fails" = "0" ] && { echo "all good"; exit 0; }
 echo "$fails failing case(s)"; exit 1

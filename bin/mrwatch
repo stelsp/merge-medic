@@ -96,9 +96,9 @@ case "$cmd" in
     last="$(tail -1 "$ROOT/logs/watch.log" 2>/dev/null | cut -d' ' -f1,2)"
     echo "  last run: ${last:-no log yet}"
 
-    fpids="$(pgrep -f "$ROOT/fix-mr.sh" 2>/dev/null || true)"
-    if [ -n "$fpids" ]; then
-      echo "  fixers  : ${GRN}RUNNING${N} ($(echo "$fpids" | wc -l | tr -d ' ')) — mrwatch top"
+    nfix="$(mm_fixer_count "$ROOT")"
+    if [ "$nfix" -gt 0 ]; then
+      echo "  fixers  : ${GRN}RUNNING${N} ($nfix) — mrwatch top"
     else
       flog="$(latest_ai_log)"
       [ -n "$flog" ] && echo "  fixers  : idle  ${DIM}last AI log: ${flog##*/}${N}" \
@@ -140,7 +140,7 @@ case "$cmd" in
       today="$(date '+%Y-%m-%d')"
       day0="$(date -j -f '%Y-%m-%d %H:%M:%S' "$today 00:00:00" +%s 2>/dev/null || date -d "$today" +%s 2>/dev/null || echo 0)"
       spent="$(cat "$ROOT/state/budget-$today" 2>/dev/null || echo 0)"
-      nfix="$(pgrep -f "$ROOT/fix-mr.sh" 2>/dev/null | wc -l | tr -d ' ')" || nfix=0
+      nfix="$(mm_fixer_count "$ROOT")" || nfix=0
       daemon_loaded && d="${GRN}on${N}" || d="${RED}off${N}"
 
       # counters from the durable ledger (state/history.log): today + all-time

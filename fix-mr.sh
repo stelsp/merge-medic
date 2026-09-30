@@ -37,22 +37,34 @@ ev() {
 evx() {
   printf '%s|%s|%s|%s\n' "$(date +%s)" "$IID" "$1" "${2:-}" >> "$LOGDIR/events.log"
 }
+# rc_text <status> — how a step ended, for events: "timed out" for
+# mm_timeout's 124, "exit N" otherwise.
+rc_text() {
+  if [ "$1" = 124 ]; then printf 'timed out'; else printf 'exit %s' "$1"; fi
+}
+# gate_eval runs a gate command in its own subshell, so nothing it does to
+# the shell (cd, exit, variables) reaches the fixer.
+gate_eval() {
+  ( eval "$1" )
+}
 # run_gate <PHASE> <command> — one event before, one after, with the outcome
 # token the dashboard colors by: "ok · 18s" / "red · exit 1 · <tail>".
+# GATE_TIMEOUT bounds it: a hung install or test run would otherwise hold
+# the fixer, and through it every later watcher tick, forever.
 run_gate() {
   local phase="$1" cmd="$2" gs rc=0 tail_out
   ev "$phase" "run · $(printf '%s' "$cmd" | cut -c1-70)"
   gs="$(date +%s)"
   # `|| rc=$?` and NOT `if ...; then`: the status of a failed if-compound is
   # the if's own (zero), so every red gate would report "exit 0"
-  ( eval "$cmd" ) >> "$LOGDIR/fixer-$IID.log" 2>&1 || rc=$?
+  mm_timeout "${GATE_TIMEOUT:-1800}" gate_eval "$cmd" >> "$LOGDIR/fixer-$IID.log" 2>&1 || rc=$?
   if [ "$rc" = 0 ]; then
     ev "$phase" "ok · $(( $(date +%s) - gs ))s"
     return 0
   fi
   tail_out="$(tail -n 3 "$LOGDIR/fixer-$IID.log" | mm_clean)"
-  ev "$phase" "red · exit $rc · $tail_out"
-  fail "$phase red (exit $rc, fixer-$IID.log)"
+  ev "$phase" "red · $(rc_text "$rc") · $tail_out"
+  fail "$phase red ($(rc_text "$rc"), fixer-$IID.log)"
 }
 notify() { mm_notify "$@"; }
 cleanup_wt() { git -C "$WATCH_REPO" worktree remove --force "$WT" 2>/dev/null || true; }
@@ -63,6 +75,7 @@ resolve_mode="none"
 # so dashboards can show full history for every MR.
 ledger() {
   local lts; lts="$(date +%s)"
+  MM_LEDGER="$1"
   printf '%s|%s|%s|%s\n' "$lts" "$IID" "$1" "$resolve_mode" >> "$ROOT/state/history.log"
   mkdir -p "$ROOT/state/runs"
   cp "$PROG" "$ROOT/state/runs/$IID-$lts.log" 2>/dev/null || true
@@ -95,11 +108,12 @@ post_note() {
   local body="$1"
   {
     if mm_is_github; then
-      gh pr comment "$IID" --repo "$PROJECT_PATH" --body "$body" \
+      mm_timeout "${NET_TIMEOUT:-300}" gh pr comment "$IID" --repo "$PROJECT_PATH" --body "$body" \
         || echo "post_note: gh pr comment failed (exit $?)"
     else
       ( cd "$WT" 2>/dev/null || cd "$WATCH_REPO"
-        GITLAB_HOST="${GITLAB_HOST:-}" glab mr note create "$IID" -m "$body" ) \
+        mm_timeout "${NET_TIMEOUT:-300}" env GITLAB_HOST="${GITLAB_HOST:-}" \
+          glab mr note create "$IID" -m "$body" ) \
         || echo "post_note: glab mr note failed (exit $?)"
     fi
   } >> "$LOGDIR/fixer-$IID.log" 2>&1 || true
@@ -189,10 +203,12 @@ resolver_call() {
 # mr_author prints the MR/PR author's username (the default trusted commenter).
 mr_author() {
   if mm_is_github; then
-    gh pr view "$IID" --repo "$PROJECT_PATH" --json author --jq '.author.login' 2>/dev/null || true
+    mm_timeout "${NET_TIMEOUT:-300}" gh pr view "$IID" --repo "$PROJECT_PATH" \
+      --json author --jq '.author.login' 2>/dev/null || true
   else
     ( cd "$WT" 2>/dev/null || cd "$WATCH_REPO"
-      GITLAB_HOST="${GITLAB_HOST:-}" glab api "projects/:fullpath/merge_requests/$IID" 2>/dev/null ) \
+      mm_timeout "${NET_TIMEOUT:-300}" env GITLAB_HOST="${GITLAB_HOST:-}" \
+        glab api "projects/:fullpath/merge_requests/$IID" 2>/dev/null ) \
       | jq -r '.author.username // empty' 2>/dev/null || true
   fi
 }
@@ -210,11 +226,12 @@ collect_feedback() { # $1 = plan file; its mtime is the cutoff
   # shellcheck disable=SC2086
   allowed_json="$(printf '%s\n' $trusted | jq -R . | jq -cs .)"
   if mm_is_github; then
-    gh pr view "$IID" --repo "$PROJECT_PATH" --json comments 2>/dev/null \
+    mm_timeout "${NET_TIMEOUT:-300}" gh pr view "$IID" --repo "$PROJECT_PATH" --json comments 2>/dev/null \
       | jq -r --argjson t "$cutoff" --argjson ok "$allowed_json" '[.comments[] | select([.author.login] | inside($ok)) | select(.body | test("^(## .? ?merge-medic|merge-medic)") | not) | select((.createdAt | fromdateiso8601) > $t) | "- " + .body] | join("\n")' 2>/dev/null || true
   else
     ( cd "$WT" 2>/dev/null || cd "$WATCH_REPO"
-      GITLAB_HOST="${GITLAB_HOST:-}" glab api "projects/:fullpath/merge_requests/$IID/notes?order_by=created_at&sort=desc&per_page=20" 2>/dev/null ) \
+      mm_timeout "${NET_TIMEOUT:-300}" env GITLAB_HOST="${GITLAB_HOST:-}" \
+        glab api "projects/:fullpath/merge_requests/$IID/notes?order_by=created_at&sort=desc&per_page=20" 2>/dev/null ) \
       | jq -r --argjson t "$cutoff" --argjson ok "$allowed_json" '[.[] | select(.system==false) | select([.author.username] | inside($ok)) | select(.body | test("^(## .? ?merge-medic|merge-medic)") | not) | select((.created_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > $t) | "- " + .body] | reverse | join("\n")' 2>/dev/null || true
   fi
 }
@@ -260,6 +277,36 @@ markers_left() {
   return 1
 }
 
+# ── no silent deaths ──────────────────────────────────────────────────────────
+# fail, escalate, defer, a posted plan and a push are the ways a run is meant
+# to end, and each leaves a trace: ledger, event, notification. Anything else
+# (set -e tripping on a git command, a shutdown's TERM) used to end the run
+# with none of that: no ledger line, the worktree left behind, the dashboard
+# frozen on the last phase, and with the SHA pair already marked tried,
+# nothing that would ever retry it. Such an exit is recorded as a failure.
+MM_LEDGER=""        # set by ledger(): the run recorded how it ended
+MM_ERR_LINE=""
+MM_HOLD_BUDGET=0    # 1 while this run holds the budget lock
+on_exit() {
+  local rc="$1" c
+  set +e
+  [ "$MM_HOLD_BUDGET" = 1 ] && rmdir "$ROOT/state/.budget.lock" 2>/dev/null
+  [ "$rc" = 0 ] && return 0
+  # a TERM or a crash can land mid-step: stop whatever that step started
+  # (a resolver still editing, a test run) before its worktree goes away
+  for c in $(pgrep -P $$ 2>/dev/null); do mm_kill_tree "$c" TERM; done
+  [ -n "$MM_LEDGER" ] && return 0
+  ev FAIL "fixer died unexpectedly ($(rc_text "$rc")${MM_ERR_LINE:+ at fix-mr.sh:$MM_ERR_LINE}) — see fixer-$IID.log"
+  ledger FAIL
+  notify "${SIGIL}$IID: fix failed" "fixer died unexpectedly ($(rc_text "$rc"))"
+  cleanup_wt
+}
+set -E
+trap 'MM_ERR_LINE=$LINENO' ERR
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'on_exit $?' EXIT
+
 : > "$PROG"
 ev START "$SRC -> $TGT · mode=$MODE · $(printf '%s' "${TITLE:-}" | cut -c1-60)"
 
@@ -271,7 +318,8 @@ if [ "$src_is_auto" = "0" ] && [ "$MODE" != "plan" ] && [ "$MODE" != "fix-approv
 fi
 
 cd "$WATCH_REPO"
-git fetch --prune --quiet origin || fail "git fetch failed"
+mm_timeout "${NET_TIMEOUT:-300}" git fetch --prune --quiet origin \
+  || { nrc=$?; fail "git fetch failed ($(rc_text "$nrc"))"; }
 
 # ── defer while humans / other agent sessions are still working ───────────────
 # The marker holds the unix time the fix is worth retrying at — not the time
@@ -440,14 +488,26 @@ else
   # ── AI budget (atomic via mkdir lock) ───────────────────────────────────────
   today="$(date '+%Y-%m-%d')"; BUDGET_FILE="$ROOT/state/budget-$today"
   BLOCK="$ROOT/state/.budget.lock"
-  until mkdir "$BLOCK" 2>/dev/null; do sleep 0.2; done
+  # The lock covers a read-modify-write of one small file: microseconds. One
+  # older than a minute was left by a run that died holding it, and every
+  # later fixer would wait on it forever — take it over.
+  waited=0
+  until mkdir "$BLOCK" 2>/dev/null; do
+    waited=$((waited + 1))
+    if [ $((waited % 50)) = 0 ] && [ -n "$(find "$BLOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+      evx WARN "info · took over a stale budget lock"
+      rmdir "$BLOCK" 2>/dev/null || true
+    fi
+    sleep 0.2
+  done
+  MM_HOLD_BUDGET=1
   spent="$(cat "$BUDGET_FILE" 2>/dev/null || echo 0)"
   # DAILY_AGENT_RUNS=0 means unlimited — count runs, never refuse
   if [ "${DAILY_AGENT_RUNS:-6}" -gt 0 ] && [ "$spent" -ge "${DAILY_AGENT_RUNS:-6}" ]; then
-    rmdir "$BLOCK"; git merge --abort 2>/dev/null || true
+    rmdir "$BLOCK"; MM_HOLD_BUDGET=0; git merge --abort 2>/dev/null || true
     fail "daily AI budget exhausted ($spent/${DAILY_AGENT_RUNS:-6})"
   fi
-  echo $((spent + 1)) > "$BUDGET_FILE"; rmdir "$BLOCK"
+  echo $((spent + 1)) > "$BUDGET_FILE"; rmdir "$BLOCK"; MM_HOLD_BUDGET=0
 
   # ── intent context: what each side did to the conflicted files ──────────────
   src_hist=""; tgt_hist=""
@@ -475,7 +535,7 @@ else
     ev PLAN "$n file(s): $(printf '%s' "$conflicts" | tr '\n' ' ' | cut -c1-120)"
     PLANFILE="$ROOT/state/plan-$IID.md"
     set +e
-    resolver_call plan "A merge of origin/$TGT into $SRC (${SIGIL}$IID${TITLE:+ — \"$TITLE\"}) has conflicts. You are in the worktree mid-merge with zdiff3 markers (||||||| shows the common ancestor). Do NOT edit anything — read the conflicted files and write a RESOLUTION PLAN as your answer.
+    mm_timeout "${RESOLVER_TIMEOUT:-900}" resolver_call plan "A merge of origin/$TGT into $SRC (${SIGIL}$IID${TITLE:+ — \"$TITLE\"}) has conflicts. You are in the worktree mid-merge with zdiff3 markers (||||||| shows the common ancestor). Do NOT edit anything — read the conflicted files and write a RESOLUTION PLAN as your answer.
 
 Conflicting files:
 $conflicts
@@ -491,7 +551,7 @@ Write GitHub-flavored markdown, no preamble: a '### <file path>' heading per fil
     prc=$?
     set -e
     git merge --abort 2>/dev/null || true
-    [ "$prc" != "0" ] && fail "plan agent exited with code $prc"
+    [ "$prc" != "0" ] && fail "plan agent failed ($(rc_text "$prc"))"
     [ -s "$PLANFILE" ] || fail "plan agent returned no text"
     ev PLANNED "awaiting approve (a) — plan posted to ${SIGIL}$IID"
     ledger PLANNED
@@ -535,7 +595,7 @@ $(cat "$PLANFILE")"
   pre_head="$(git rev-parse HEAD)"
   pre_index="$(index_snapshot)"
   set +e
-  resolver_call resolve "You are resolving git merge conflicts in a worktree (branch $SRC, origin/$TGT merged in, ${SIGIL}$IID${TITLE:+ — \"$TITLE\"}).
+  mm_timeout "${RESOLVER_TIMEOUT:-900}" resolver_call resolve "You are resolving git merge conflicts in a worktree (branch $SRC, origin/$TGT merged in, ${SIGIL}$IID${TITLE:+ — \"$TITLE\"}).
 
 Conflict markers use zdiff3 style: between <<<<<<< and >>>>>>> you also see the
 common-ancestor version (||||||| block) — use it to understand what EACH side
@@ -591,7 +651,7 @@ $(cat "$ROOT/state/esc-$IID.md")
     cleanup_wt
     exit 2
   fi
-  [ "$rc" != "0" ] && fail "resolver exited with code $rc (log: ${AILOG##*/})"
+  [ "$rc" != "0" ] && fail "resolver failed ($(rc_text "$rc"), log: ${AILOG##*/})"
   # the merge is the bot's to conclude: a resolver that committed or aborted
   # it has left a state nobody reviewed
   [ "$(git rev-parse HEAD)" = "$pre_head" ] || fail "resolver moved HEAD (it committed on its own) — nothing pushed"
@@ -656,14 +716,15 @@ res_link=""
 if [ "${PUSH_MODE:-mr}" != "direct" ]; then
   FIXBR="merge-medic/fix-$IID-$(date +%s)"
   ev PUSH "mr · resolution branch $FIXBR (your branch stays untouched)"
-  git push origin "HEAD:refs/heads/$FIXBR" >/dev/null 2>&1 || fail "push of $FIXBR rejected"
+  mm_timeout "${NET_TIMEOUT:-300}" git push origin "HEAD:refs/heads/$FIXBR" >/dev/null 2>&1 \
+    || { nrc=$?; fail "push of $FIXBR failed ($(rc_text "$nrc"))"; }
   res_title="merge-medic: resolve conflicts of ${SIGIL}$IID ($SRC <- $TGT)"
   res_body="Automated conflict resolution for ${SIGIL}$IID. Merge this into \`$SRC\` to clear the conflict — your branch is untouched until you do."
   if mm_is_github; then
-    res_link="$(gh pr create --repo "$PROJECT_PATH" --head "$FIXBR" --base "$SRC" \
+    res_link="$(mm_timeout "${NET_TIMEOUT:-300}" gh pr create --repo "$PROJECT_PATH" --head "$FIXBR" --base "$SRC" \
       --title "$res_title" --body "$res_body" 2>>"$LOGDIR/fixer-$IID.log" || true)"
   else
-    res_link="$(GITLAB_HOST="${GITLAB_HOST:-}" glab api "projects/:fullpath/merge_requests" \
+    res_link="$(mm_timeout "${NET_TIMEOUT:-300}" env GITLAB_HOST="${GITLAB_HOST:-}" glab api "projects/:fullpath/merge_requests" \
       -f "source_branch=$FIXBR" -f "target_branch=$SRC" -f "title=$res_title" \
       -f "description=$res_body" -f remove_source_branch=true 2>>"$LOGDIR/fixer-$IID.log" \
       | jq -r '.web_url // empty' || true)"
@@ -674,7 +735,8 @@ if [ "${PUSH_MODE:-mr}" != "direct" ]; then
   notify "${SIGIL}$IID resolved ✓" "review & merge: $res_link"
 else
   ev PUSH "direct · origin $SRC"
-  git push origin "HEAD:$SRC" >/dev/null 2>&1 || fail "push rejected — $SRC moved ahead, next tick retries"
+  mm_timeout "${NET_TIMEOUT:-300}" git push origin "HEAD:$SRC" >/dev/null 2>&1 \
+    || { nrc=$?; fail "push to $SRC failed ($(rc_text "$nrc")) — if $SRC moved ahead, the next tick retries"; }
 
   ev DONE "ok · merged origin/$TGT into $SRC, gates green, pushed $(git rev-parse --short HEAD)"
   ledger DONE

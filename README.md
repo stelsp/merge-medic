@@ -111,6 +111,7 @@ tool does this; here it costs zero tokens and zero API calls.
 | Defer while hot | a branch pushed less than `QUIET_MINUTES` ago (or with uncommitted work in `USER_REPOS`) is DEFERRED, not raced — retried every tick for free until it goes quiet |
 | Excluded branches | branches you are actively pushing to are ignored |
 | Dedicated clone | fixers work in their own clone + per-MR worktrees, never in your checkout |
+| Deadlines | every AI call, gate and network step has a timeout; a fixer that dies any other way is still recorded as FAIL, notified and cleaned up |
 | Scoped AI | resolver runs headless with a minimal tool allowlist, and its result is checked before anything is committed: a change outside the conflicted files, a commit or merge abort of its own, or a leftover conflict marker fails the run |
 | DRY_RUN | default mode: detect and log only |
 
@@ -253,6 +254,7 @@ Everything lives in `config.env` (gitignored; seeded from
 | `EXCLUDE_BRANCHES` | branches to ignore (your active work) |
 | `DAILY_AGENT_RUNS` | daily cap on AI invocations; `0` = unlimited (runs still counted) |
 | `PARALLEL_FIXERS` | concurrent fixers (`1` = sequential) |
+| `RESOLVER_TIMEOUT` / `GATE_TIMEOUT` / `NET_TIMEOUT` | deadlines in seconds for one AI call (900), each gate (1800) and each git/forge network call (300); past it the step and everything it started are stopped and the run fails as timed out. `0` = none |
 | `NOTIFY` / `NOTIFY_SOUND` | desktop notifications |
 
 ## Architecture
