@@ -236,6 +236,24 @@ collect_feedback() { # $1 = plan file; its mtime is the cutoff
   fi
 }
 
+# open_resolution_mr: URL of a resolution MR/PR this bot opened earlier for
+# this MR that nobody has merged or closed yet (source merge-medic/fix-<iid>-*,
+# target $SRC). Prints nothing when there is none; fails when the forge could
+# not be asked.
+open_resolution_mr() {
+  local prefix="merge-medic/fix-$IID-" enc
+  if mm_is_github; then
+    mm_timeout "${NET_TIMEOUT:-300}" gh pr list --repo "$PROJECT_PATH" --state open \
+        --base "$SRC" --limit 100 --json headRefName,url 2>/dev/null \
+      | jq -er --arg p "$prefix" '[.[] | select(.headRefName | startswith($p)) | .url][0] // ""' 2>/dev/null
+  else
+    enc="$(jq -rn --arg s "$SRC" '$s | @uri')"
+    mm_timeout "${NET_TIMEOUT:-300}" env GITLAB_HOST="${GITLAB_HOST:-}" glab api \
+        "projects/${PROJECT_PATH//\//%2F}/merge_requests?state=opened&target_branch=$enc&per_page=100" 2>/dev/null \
+      | jq -er --arg p "$prefix" '[.[] | select(.source_branch | startswith($p)) | .web_url][0] // ""' 2>/dev/null
+  fi
+}
+
 # ── what the resolver is allowed to leave behind ─────────────────────────────
 # The prompt asks it to touch nothing but the conflicted hunks; these checks
 # are what hold it to that. Everything staged after the resolver ran is
@@ -387,6 +405,22 @@ if [ "${QUIET_MINUTES:-0}" -gt 0 ]; then
               "$(( local_ts + QUIET_MINUTES * 60 ))"
     fi
   done
+fi
+
+# ── one resolution MR per MR ──────────────────────────────────────────────────
+# In mr mode a resolution waits for a human to merge it, and until then the
+# MR is still conflicted. Every push to either branch changes the dedup key
+# and used to start another resolver run and open another resolution MR for
+# the same conflict. An open one means the answer is already up for review.
+# (An approved run is a human asking for a fresh one: it is not held back.)
+if [ "${PUSH_MODE:-mr}" != "direct" ] && [ "$MODE" != "fix-approved" ]; then
+  if open_res="$(open_resolution_mr)"; then
+    if [ -n "$open_res" ]; then
+      defer "resolution MR already open, merge or close it first: $open_res" "$(( $(date +%s) + 3600 ))"
+    fi
+  else
+    ev CONTEXT "info · could not look up open resolution MRs — continuing"
+  fi
 fi
 
 ev WORKTREE "$WT"

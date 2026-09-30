@@ -141,6 +141,61 @@ check "a fixer with two subshells counts once" "1" "$(mm_fixer_count "$FAKE_ROOT
 mm_kill_tree "$fake" TERM; wait "$fake" 2>/dev/null
 check "no fixer, no count"                     "0" "$(mm_fixer_count "$FAKE_ROOT")"
 
+# ── resolution MRs: one per MR, and never treated as work ───────────────────
+echo
+echo "resolution MRs:"
+eval "$(sed -n '/^open_resolution_mr() {/,/^}/p' "$ROOT/fix-mr.sh")"
+# stand-ins for the forge CLIs: print what the test sets, exit how it says
+mkdir -p "$TMP/bin"
+for cli in gh glab; do
+  # shellcheck disable=SC2016  # the stub expands these itself, at run time
+  printf '#!/bin/sh\nprintf "%%s" "$FORGE_OUT"\nexit "${FORGE_RC:-0}"\n' > "$TMP/bin/$cli"
+  chmod +x "$TMP/bin/$cli"
+done
+PATH="$TMP/bin:$PATH"
+# shellcheck disable=SC2034  # read by the extracted open_resolution_mr body
+{ IID=7; SRC=feat-7; PROJECT_PATH=group/repo; }
+
+PROVIDER=github
+export FORGE_RC=0
+export FORGE_OUT='[{"headRefName":"merge-medic/fix-70-1700000000","url":"https://x/pull/2"},
+  {"headRefName":"merge-medic/fix-7-1700000000","url":"https://x/pull/3"}]'
+check "github: finds this MR's open resolution" "https://x/pull/3" "$(open_resolution_mr)"
+export FORGE_OUT='[{"headRefName":"merge-medic/fix-70-1700000000","url":"https://x/pull/2"}]'
+out="$(open_resolution_mr)"; rc=$?
+check "github: another MR's resolution is not ours" "/0" "$out/$rc"
+export FORGE_OUT='' FORGE_RC=1
+if open_resolution_mr >/dev/null; then rc=0; else rc=1; fi
+check "github: a failed lookup is reported, not read as none" "1" "$rc"
+
+PROVIDER=gitlab
+export FORGE_RC=0
+export FORGE_OUT='[{"source_branch":"merge-medic/fix-7-1700000000","web_url":"https://x/-/merge_requests/9"}]'
+check "gitlab: finds this MR's open resolution" "https://x/-/merge_requests/9" "$(open_resolution_mr)"
+export FORGE_OUT='{"message":"401 Unauthorized"}'
+if open_resolution_mr >/dev/null; then rc=0; else rc=1; fi
+check "gitlab: an error answer is a failed lookup" "1" "$rc"
+unset FORGE_OUT FORGE_RC
+
+# the watcher: an MR whose source is our own resolution branch is not work
+eval "$(sed -n '/^consider() {/,/^}/p' "$ROOT/watch.sh")"
+# shellcheck disable=SC2329,SC2317  # called from the extracted consider body
+logc() { :; }
+# shellcheck disable=SC2329,SC2317
+notify() { :; }
+# shellcheck disable=SC2329,SC2317
+skip_once() { :; }
+# shellcheck disable=SC2329,SC2317
+defer_gate() { return 0; }
+# shellcheck disable=SC2034  # read by the extracted consider body
+{ STATE="$TMP/state"; N_OPEN=0; N_CONF=0; OPEN_IIDS=" "; SK_DRAFT=0; SK_EXCL=0
+  SK_INCL=0; SK_DEDUP=0; verbose=0; MARK=tried; SIGIL='!'; targets=""; AUTO_BRANCHES="feat-*"; }
+mkdir -p "$STATE"
+consider 12 merge-medic/fix-7-1700000000 feat-7 "resolution" false conflict aaa bbb
+check "our own resolution MR is skipped"        "/1" "$targets/$SK_EXCL"
+consider 7 feat-7 main "a feature" false conflict ccc ddd
+check "an ordinary conflicted MR is still picked" "7	feat-7	main	auto" "$(printf '%s' "$targets" | cut -f1-4)"
+
 rm -rf "$TMP"
 [ "$fails" = "0" ] && { echo "all good"; exit 0; }
 echo "$fails failing case(s)"; exit 1

@@ -241,7 +241,7 @@ Everything lives in `config.env` (gitignored; seeded from
 | `REGRESSION_CMD` / `REGRESSION_WHEN` | full suite gate: `ai` (default) / `always` / `never` |
 | `RESOLVER` | `claude` (default) / `aider` (any model via API keys: `RESOLVER_MODEL`) / `custom` (`RESOLVER_CMD`) |
 | `RULES_KEEP_OURS` | ERE for lines that carry no decision (a `> verified: <sha>` stamp every branch rewrites). A hunk differing only in such lines is resolved in your favour before the model is called — no tokens, no budget slot. Anything else in the hunk sends it to the resolver untouched. |
-| `PUSH_MODE` | `mr` (default: your branch is never touched — the resolution is opened as its own MR/PR into it, you review and merge) / `direct` (the merge commit is pushed into the source branch) |
+| `PUSH_MODE` | `mr` (default: your branch is never touched — the resolution is opened as its own MR/PR into it, you review and merge; one open resolution per MR, new pushes wait for it) / `direct` (the merge commit is pushed into the source branch) |
 | `TRUSTED_AUTHORS` | usernames whose plan comments the approved run obeys (default: the MR author only) |
 | `RESOLVE_POLICY_FILE` | project-specific resolution rules appended to the prompt |
 | `AUTO_BRANCHES` | source-branch globs fixed fully automatically (default `feat-*`); any other source gets the semi-auto flow: plan → MR comment → human approve (`a` in the dashboard) → fix that reads your comments |

@@ -175,6 +175,13 @@ consider() {
     SK_DRAFT=$((SK_DRAFT + 1)); skip_once "$iid" "draft" "draft · SKIP_DRAFTS=1"; return 0
   fi
 
+  # merge-medic's own resolution MRs are answers waiting for a human, never
+  # work: resolving one would stack a resolution on a resolution
+  case "$src" in
+    merge-medic/*)
+      SK_EXCL=$((SK_EXCL + 1)); skip_once "$iid" "own" "excluded · merge-medic's own resolution MR"; return 0 ;;
+  esac
+
   local ex
   # shellcheck disable=SC2153  # EXCLUDE_BRANCHES comes from config.env
   for ex in ${EXCLUDE_BRANCHES:-}; do
