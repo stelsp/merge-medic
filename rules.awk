@@ -4,36 +4,31 @@
 # can decide without a model. Always prints a usable file: decided hunks are
 # collapsed, the rest keep their markers, so whatever is left is a smaller
 # job for the resolver rather than a lost one.
-# Exit status: 0 = every hunk decided, 1 = some left, 2 = malformed input.
+# Exit status: 0 = every hunk decided, 1 = some left, 2 = malformed input,
+# 3 = no conflict hunk at all. A file git reports as conflicted but wrote no
+# markers into (modify/delete, binary) is not a line-level conflict, so a
+# line rule has nothing to decide there: the caller leaves it to the resolver.
 #
-# Today there is one rule, KEEP_OURS: a hunk is ours when every line that
-# differs between the two sides matches the KEEP_OURS pattern. That covers
-# the stamp lines tools rewrite on every branch — "> verified: <sha>" and
-# friends — which conflict constantly and never carry a decision.
+# Today there is one rule, KEEP_OURS: a hunk is ours when the two sides are
+# the same text once the lines matching the KEEP_OURS pattern are taken out.
+# That covers the stamp lines tools rewrite on every branch — "> verified:
+# <sha>" and friends — which conflict constantly and never carry a decision.
 #
 # Usage: awk -v keep_ours='<ERE>' -f rules.awk <file>
 
-function flush_hunk(  i, decided, line) {
-    # a hunk is decidable when every line unique to one side matches the
-    # pattern: whatever survives, no information is lost
+function flush_hunk(  i, decided, a, b, na, nb) {
+    # Decidable only when, stamps aside, both sides hold the same lines in
+    # the same order and number: keeping ours then loses nothing but the
+    # other side's stamps. Comparing sets instead would call a hunk decided
+    # when theirs reordered or repeated a line, and silently drop that.
     decided = (keep_ours != "")
     if (decided) {
-        for (i = 1; i <= n_ours; i++) {
-            line = ours[i]
-            if (line ~ keep_ours) continue
-            if (line in theirs_set) continue   # same line on both sides
-            decided = 0
-            break
-        }
-    }
-    if (decided) {
-        for (i = 1; i <= n_theirs; i++) {
-            line = theirs[i]
-            if (line ~ keep_ours) continue
-            if (line in ours_set) continue
-            decided = 0
-            break
-        }
+        na = nb = 0
+        for (i = 1; i <= n_ours; i++)   if (ours[i] !~ keep_ours)   a[++na] = ours[i]
+        for (i = 1; i <= n_theirs; i++) if (theirs[i] !~ keep_ours) b[++nb] = theirs[i]
+        if (na != nb) decided = 0
+        # ("" forces a string comparison: awk would call "10" and "10.0" equal)
+        for (i = 1; decided && i <= na; i++) if ((a[i] "") != (b[i] "")) decided = 0
     }
     # nothing differs at all, or every difference is a stamp: keep ours
     if (decided) {
@@ -54,8 +49,6 @@ function flush_hunk(  i, decided, line) {
     }
     n_ours = n_base = n_theirs = 0
     seen_base = 0
-    delete ours_set
-    delete theirs_set
 }
 
 BEGIN { side = 0; resolved = 0; left = 0 }
@@ -63,7 +56,6 @@ BEGIN { side = 0; resolved = 0; left = 0 }
 /^<<<<<<< / {
     side = 1; marker_ours = $0
     n_ours = n_base = n_theirs = 0; seen_base = 0
-    delete ours_set; delete theirs_set
     next
 }
 /^\|\|\|\|\|\|\|/  { if (side == 1) { side = 2; marker_base = $0; seen_base = 1; next } }
@@ -71,15 +63,16 @@ BEGIN { side = 0; resolved = 0; left = 0 }
 /^>>>>>>> /       { if (side == 3) { marker_theirs = $0; side = 0; flush_hunk(); next } }
 
 {
-    if (side == 1)      { ours[++n_ours] = $0;     ours_set[$0] = 1 }
-    else if (side == 2) { base[++n_base] = $0 }
-    else if (side == 3) { theirs[++n_theirs] = $0; theirs_set[$0] = 1 }
+    if (side == 1)      ours[++n_ours] = $0
+    else if (side == 2) base[++n_base] = $0
+    else if (side == 3) theirs[++n_theirs] = $0
     else                  print
 }
 
 END {
     # an unterminated hunk means the file is not what we think it is
     if (side != 0) { exit 2 }
+    if (resolved + left == 0) exit 3
     if (left > 0) exit 1
     exit 0
 }

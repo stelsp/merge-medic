@@ -399,19 +399,29 @@ else
   rules_only=0
   if [ -n "${RULES_KEEP_OURS:-}" ]; then
     rules_left=""; rules_done=0; rc=0
-    for f in $conflicts; do
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      # a conflicted path with no file behind it (the deleted side of a
+      # modify/delete) has no lines to decide
+      if [ ! -f "$f" ]; then
+        rules_left="$rules_left$f
+"
+        continue
+      fi
       awk -v keep_ours="${RULES_KEEP_OURS}" -f "$ROOT/rules.awk" "$f" > "$f.mm-rules" 2>/dev/null || rc=$?
       case "$rc" in
         0) mv "$f.mm-rules" "$f"; git add -- "$f"; rules_done=$((rules_done + 1)) ;;
         1) mv "$f.mm-rules" "$f"                       # partly decided: fewer hunks for the model
            rules_left="$rules_left$f
 " ;;
-        *) rm -f "$f.mm-rules"                         # unparsable: leave the file exactly as git left it
+        # unparsable, or no hunks at all (modify/delete, binary): leave the
+        # file exactly as git left it
+        *) rm -f "$f.mm-rules"
            rules_left="$rules_left$f
 " ;;
       esac
       rc=0
-    done
+    done <<<"$conflicts"
     [ "$rules_done" -gt 0 ] && ev RULES "ok · $rules_done of $n file(s) decided by rules, no model"
     conflicts="$(printf '%s' "$rules_left" | sed '/^$/d')"
     n="$(printf '%s\n' "$conflicts" | grep -c . || true)"

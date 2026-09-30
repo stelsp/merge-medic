@@ -84,12 +84,75 @@ run '' "$TMP/stamp"; rc=$RC; out="$OUT"
 check "empty pattern decides nothing" "1" "$rc"
 check "empty pattern changes nothing" "$(cat "$TMP/stamp")" "$out"
 
-# ── a clean file passes through untouched ───────────────────────────────────
+# ── no hunk at all: git called it conflicted but wrote no markers ───────────
+# (modify/delete, binary). There is nothing a line rule can decide, and
+# "decided" here would have the caller stage the file as git left it.
 printf 'a\nb\n' > "$TMP/clean"
 run '^> verified: ' "$TMP/clean"; rc=$RC; out="$OUT"
-check "clean file untouched" "a
+check "markerless file untouched"          "a
 b" "$out"
-check "clean file exits 0"   "0" "$rc"
+check "markerless file is refused, not decided" "3" "$rc"
+
+# ── same lines, different order: not a stamp-only difference ────────────────
+cat > "$TMP/reorder" <<'EOF'
+<<<<<<< HEAD
+alpha
+beta
+> verified: aaaa111
+=======
+beta
+alpha
+> verified: bbbb222
+>>>>>>> origin/dev
+EOF
+run '^> verified: ' "$TMP/reorder"; rc=$RC; out="$OUT"
+check "reordered lines refused"      "1" "$rc"
+check "…and kept verbatim"           "$(cat "$TMP/reorder")" "$out"
+
+# ── a line the other side repeats is a change too ───────────────────────────
+cat > "$TMP/repeat" <<'EOF'
+<<<<<<< HEAD
+item
+> verified: aaaa111
+=======
+item
+item
+> verified: bbbb222
+>>>>>>> origin/dev
+EOF
+run '^> verified: ' "$TMP/repeat"; rc=$RC
+check "repeated line refused" "1" "$rc"
+
+# ── numbers are text: "10" and "10.0" are different lines ───────────────────
+cat > "$TMP/numeric" <<'EOF'
+<<<<<<< HEAD
+10
+> verified: aaaa111
+=======
+10.0
+> verified: bbbb222
+>>>>>>> origin/dev
+EOF
+run '^> verified: ' "$TMP/numeric"; rc=$RC
+check "numeric-looking lines compared as text" "1" "$rc"
+
+# ── identical text around the stamps, same order: still decided ────────────
+cat > "$TMP/same" <<'EOF'
+<<<<<<< HEAD
+# Title
+> verified: aaaa111
+body
+=======
+# Title
+> verified: bbbb222
+body
+>>>>>>> origin/dev
+EOF
+run '^> verified: ' "$TMP/same"; rc=$RC; out="$OUT"
+check "stamp amid identical lines decided" "0" "$rc"
+check "…keeping ours"                      "# Title
+> verified: aaaa111
+body" "$out"
 
 # ── diff3 markers without a description, and no base block at all ───────────
 cat > "$TMP/nobase" <<'EOF'
