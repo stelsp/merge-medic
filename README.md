@@ -111,7 +111,7 @@ tool does this; here it costs zero tokens and zero API calls.
 | Defer while hot | a branch pushed less than `QUIET_MINUTES` ago (or with uncommitted work in `USER_REPOS`) is DEFERRED, not raced — retried every tick for free until it goes quiet |
 | Excluded branches | branches you are actively pushing to are ignored |
 | Dedicated clone | fixers work in their own clone + per-MR worktrees, never in your checkout |
-| Scoped AI | resolver runs headless with a minimal tool allowlist; it cannot commit or push |
+| Scoped AI | resolver runs headless with a minimal tool allowlist, and its result is checked before anything is committed: a change outside the conflicted files, a commit or merge abort of its own, or a leftover conflict marker fails the run |
 | DRY_RUN | default mode: detect and log only |
 
 Desktop notifications (macOS `osascript` / Linux `notify-send` / Windows

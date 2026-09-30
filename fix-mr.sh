@@ -160,10 +160,12 @@ resolver_call() {
       # Any model aider supports (OpenAI/Gemini/DeepSeek/OpenRouter/Ollama...).
       # API keys come from config.env (export them there) or the environment.
       # --dry-run keeps the plan phase read-only; we commit ourselves.
+      # --no-gitignore: aider would otherwise append its own entries to the
+      # project's .gitignore, an edit outside the conflict that fails the run.
       local dry=""
       [ "$mode" = "plan" ] && dry="--dry-run"
       # shellcheck disable=SC2086
-      printf '%s' "$prompt" | aider $dry --yes-always --no-auto-commits \
+      printf '%s' "$prompt" | aider $dry --yes-always --no-auto-commits --no-gitignore \
         ${RESOLVER_MODEL:+--model "$RESOLVER_MODEL"} \
         --message-file /dev/stdin 2>>"$errlog" || rc=$?
       ;;
@@ -215,6 +217,47 @@ collect_feedback() { # $1 = plan file; its mtime is the cutoff
       GITLAB_HOST="${GITLAB_HOST:-}" glab api "projects/:fullpath/merge_requests/$IID/notes?order_by=created_at&sort=desc&per_page=20" 2>/dev/null ) \
       | jq -r --argjson t "$cutoff" --argjson ok "$allowed_json" '[.[] | select(.system==false) | select([.author.username] | inside($ok)) | select(.body | test("^(## .? ?merge-medic|merge-medic)") | not) | select((.created_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > $t) | "- " + .body] | reverse | join("\n")' 2>/dev/null || true
   fi
+}
+
+# ── what the resolver is allowed to leave behind ─────────────────────────────
+# The prompt asks it to touch nothing but the conflicted hunks; these checks
+# are what hold it to that. Everything staged after the resolver ran is
+# compared with the index as it was before, so an edit anywhere else — a
+# protected file included — fails the run instead of riding along in the
+# merge commit.
+
+# index_snapshot: every merged (stage 0) index entry as "mode blob 0<TAB>path".
+index_snapshot() {
+  git ls-files -s | awk '$3 == 0'
+}
+
+# out_of_scope <snapshot> <allowed paths, one per line>: prints every path
+# whose entry was added, removed or changed since the snapshot and is not
+# allowed. Run it after staging; no output = the resolver stayed in scope.
+out_of_scope() {
+  local before="$1" allowed="$2"
+  { printf '%s\n' "$before"; index_snapshot; } | sed '/^$/d' | LC_ALL=C sort | uniq -u \
+    | cut -f2- | LC_ALL=C sort -u \
+    | grep -vxF -f <(printf '%s\n' "$allowed" | sed '/^$/d') || true
+}
+
+# markers_left <file>: true when the file has more conflict-marker lines of
+# any kind than either side of the merge had on its own. Counting against
+# both sides keeps files that legitimately contain marker-like lines (test
+# fixtures, docs about git) resolvable, and still catches a stray =======
+# or >>>>>>> that a "<<<<<<< only" check lets through into a .md or .sql
+# file, where no build or test would notice it.
+markers_left() {
+  local f="$1" re now ours theirs
+  for re in '^<<<<<<< ' '^||||||| ' '^=======$' '^>>>>>>> '; do
+    now="$(grep -c -e "$re" -- "$f" 2>/dev/null || true)"
+    ours="$(git show "HEAD:$f" 2>/dev/null | grep -c -e "$re" || true)"
+    theirs="$(git show "MERGE_HEAD:$f" 2>/dev/null | grep -c -e "$re" || true)"
+    if [ "${now:-0}" -gt "${ours:-0}" ] && [ "${now:-0}" -gt "${theirs:-0}" ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 : > "$PROG"
@@ -479,6 +522,8 @@ $(cat "$PLANFILE")"
 
   ev AI_RESOLVE "$n file(s): $(printf '%s' "$conflicts" | tr '\n' ' ' | cut -c1-120)"
   AILOG="$LOGDIR/ai-$IID-$(date '+%Y%m%d-%H%M%S').log"
+  pre_head="$(git rev-parse HEAD)"
+  pre_index="$(index_snapshot)"
   set +e
   resolver_call resolve "You are resolving git merge conflicts in a worktree (branch $SRC, origin/$TGT merged in, ${SIGIL}$IID${TITLE:+ — \"$TITLE\"}).
 
@@ -537,18 +582,26 @@ $(cat "$ROOT/state/esc-$IID.md")
     exit 2
   fi
   [ "$rc" != "0" ] && fail "resolver exited with code $rc (log: ${AILOG##*/})"
+  # the merge is the bot's to conclude: a resolver that committed or aborted
+  # it has left a state nobody reviewed
+  [ "$(git rev-parse HEAD)" = "$pre_head" ] || fail "resolver moved HEAD (it committed on its own) — nothing pushed"
+  git rev-parse -q --verify MERGE_HEAD >/dev/null || fail "resolver ended the merge itself — nothing pushed"
   [ -n "$(git diff --name-only --diff-filter=U)" ] && fail "unresolved files remain"
   # per-file loop (not an unquoted $conflicts expansion): survives spaces in paths
-  markers_left=0
   while IFS= read -r cf; do
     [ -n "$cf" ] || continue
-    grep -q '^<<<<<<< ' "$cf" 2>/dev/null && { markers_left=1; break; }
+    markers_left "$cf" && fail "conflict markers remain in $cf"
   done <<<"$conflicts"
-  [ "$markers_left" = "1" ] && fail "conflict markers remain"
   rm -f "$ESCFILE"
   # capture the AI's summary BEFORE staging so it never lands in the commit
   [ -f "$SUMFILE" ] && summary="$(cat "$SUMFILE")" && rm -f "$SUMFILE"
-  git add -A
+  # aider keeps its chat history and repo-map cache (.aider*) in the repo
+  # root: resolver bookkeeping, never part of the resolution
+  git add -A -- . ':(exclude).aider*'
+  stray="$(out_of_scope "$pre_index" "$conflicts")"
+  if [ -n "$stray" ]; then
+    fail "resolver changed files outside the conflict — nothing pushed: $(printf '%s' "$stray" | tr '\n' ' ' | cut -c1-200)"
+  fi
   # The trailer is how a later tick recognises this commit as ours: without
   # it a bot push and an agent push are indistinguishable, and the fixer
   # defers itself for QUIET_MINUTES after every resolution it lands.

@@ -49,6 +49,59 @@ if mm_src_is_auto feat-99; then hit=1; else hit=0; fi
 check "feat-* stays a glob beside a feat-local directory" "1" "$hit"
 cd "$ROOT" || exit 1
 
+# ── resolver scope: what an AI run may leave behind ─────────────────────────
+eval "$(sed -n '/^index_snapshot() {/,/^}/p' "$ROOT/fix-mr.sh")"
+eval "$(sed -n '/^out_of_scope() {/,/^}/p' "$ROOT/fix-mr.sh")"
+eval "$(sed -n '/^markers_left() {/,/^}/p' "$ROOT/fix-mr.sh")"
+
+echo
+echo "resolver scope:"
+REPO="$TMP/scope"
+git init -q "$REPO"
+cd "$REPO" || exit 1
+git config user.email t@t; git config user.name t; git config commit.gpgsign false
+printf 'shared\n' > conflict.txt
+printf 'untouched\n' > other.txt
+# a file that is ABOUT conflicts: marker-like lines on both sides, legitimately
+printf 'example:\n<<<<<<< HEAD\n=======\n>>>>>>> theirs\n' > fixture.md
+git add -A; git commit -qm base
+git checkout -qb theirs
+printf 'theirs\n' > conflict.txt; git commit -qam theirs
+git checkout -q -
+printf 'ours\n' > conflict.txt; git commit -qam ours
+git -c merge.conflictStyle=zdiff3 merge -q theirs >/dev/null 2>&1
+conflicts="$(git diff --name-only --diff-filter=U)"
+check "the harness produced one conflict" "conflict.txt" "$conflicts"
+
+before="$(index_snapshot)"
+printf 'resolved\n' > conflict.txt
+git add -A
+check "resolving only the conflicted file is in scope" "" "$(out_of_scope "$before" "$conflicts")"
+
+printf 'edited behind our back\n' > other.txt
+printf 'new\n' > created.txt
+git add -A
+check "an edit elsewhere and a new file are both caught" "created.txt
+other.txt" "$(out_of_scope "$before" "$conflicts")"
+git rm -q --cached created.txt; rm -f created.txt; git checkout -q HEAD -- other.txt
+
+git rm -q other.txt
+check "a deletion elsewhere is caught" "other.txt" "$(out_of_scope "$before" "$conflicts")"
+git checkout -q HEAD -- other.txt
+
+if markers_left fixture.md; then ml=1; else ml=0; fi
+check "marker-like lines both sides already had are not leftovers" "0" "$ml"
+printf 'resolved\n=======\n' > conflict.txt
+if markers_left conflict.txt; then ml=1; else ml=0; fi
+check "a stray ======= is a leftover" "1" "$ml"
+printf 'resolved\n>>>>>>> theirs\n' > conflict.txt
+if markers_left conflict.txt; then ml=1; else ml=0; fi
+check "a stray >>>>>>> is a leftover" "1" "$ml"
+printf 'resolved\n' > conflict.txt
+if markers_left conflict.txt; then ml=1; else ml=0; fi
+check "a clean resolution has no leftovers" "0" "$ml"
+cd "$ROOT" || exit 1
+
 rm -rf "$TMP"
 [ "$fails" = "0" ] && { echo "all good"; exit 0; }
 echo "$fails failing case(s)"; exit 1
