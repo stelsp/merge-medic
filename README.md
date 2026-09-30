@@ -111,7 +111,7 @@ tool does this; here it costs zero tokens and zero API calls.
 | Defer while hot | a branch pushed less than `QUIET_MINUTES` ago (or with uncommitted work in `USER_REPOS`) is DEFERRED, not raced — retried every tick for free until it goes quiet |
 | Excluded branches | branches you are actively pushing to are ignored |
 | Dedicated clone | fixers work in their own clone + per-MR worktrees, never in your checkout |
-| Deadlines | every AI call, gate and network step has a timeout; a fixer that dies any other way is still recorded as FAIL, notified and cleaned up |
+| Deadlines | in the fixer, every AI call, gate and network step has a timeout, and a step past it is stopped with everything it started; a fixer that dies any other way is still recorded as FAIL, notified and cleaned up |
 | Scoped AI | resolver runs headless with a minimal tool allowlist, and its result is checked before anything is committed: a change outside the conflicted files, a commit or merge abort of its own, or a leftover conflict marker fails the run |
 | DRY_RUN | default mode: detect and log only |
 
@@ -241,7 +241,7 @@ Everything lives in `config.env` (gitignored; seeded from
 | `REGRESSION_CMD` / `REGRESSION_WHEN` | full suite gate: `ai` (default) / `always` / `never` |
 | `RESOLVER` | `claude` (default) / `aider` (any model via API keys: `RESOLVER_MODEL`) / `custom` (`RESOLVER_CMD`) |
 | `RULES_KEEP_OURS` | ERE for lines that carry no decision (a `> verified: <sha>` stamp every branch rewrites). A hunk differing only in such lines is resolved in your favour before the model is called — no tokens, no budget slot. Anything else in the hunk sends it to the resolver untouched. |
-| `PUSH_MODE` | `mr` (default: your branch is never touched — the resolution is opened as its own MR/PR into it, you review and merge; one open resolution per MR, new pushes wait for it) / `direct` (the merge commit is pushed into the source branch) |
+| `PUSH_MODE` | `mr` (default: your branch is never touched — the resolution is opened as its own MR/PR into it, you review and merge; while one is open, new pushes wait for it instead of opening another — an approved run, or a lookup the forge does not answer, can still open a second) / `direct` (the merge commit is pushed into the source branch) |
 | `TRUSTED_AUTHORS` | usernames whose plan comments the approved run obeys (default: the MR author only) |
 | `RESOLVE_POLICY_FILE` | project-specific resolution rules appended to the prompt |
 | `AUTO_BRANCHES` | source-branch globs fixed fully automatically (default `feat-*`); any other source gets the semi-auto flow: plan → MR comment → human approve (`a` in the dashboard) → fix that reads your comments |
@@ -254,7 +254,7 @@ Everything lives in `config.env` (gitignored; seeded from
 | `EXCLUDE_BRANCHES` | branches to ignore (your active work) |
 | `DAILY_AGENT_RUNS` | daily cap on AI invocations; `0` = unlimited (runs still counted) |
 | `PARALLEL_FIXERS` | concurrent fixers (`1` = sequential) |
-| `RESOLVER_TIMEOUT` / `GATE_TIMEOUT` / `NET_TIMEOUT` | deadlines in seconds for one AI call (900), each gate (1800) and each git/forge network call (300); past it the step and everything it started are stopped and the run fails as timed out. `0` = none |
+| `RESOLVER_TIMEOUT` / `GATE_TIMEOUT` / `NET_TIMEOUT` | fixer deadlines in seconds for one AI call (900), each gate (1800) and each git/forge network call (300); past it the step and everything it started are stopped (TERM, then KILL). A timed-out fetch, push, AI call or gate fails the run; a timed-out MR lookup or comment is logged and the run goes on. `0` = none; a value that is not a whole number falls back to the default |
 | `NOTIFY` / `NOTIFY_SOUND` | desktop notifications |
 
 ## Architecture

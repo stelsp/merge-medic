@@ -53,6 +53,7 @@ cd "$ROOT" || exit 1
 eval "$(sed -n '/^index_snapshot() {/,/^}/p' "$ROOT/fix-mr.sh")"
 eval "$(sed -n '/^out_of_scope() {/,/^}/p' "$ROOT/fix-mr.sh")"
 eval "$(sed -n '/^markers_left() {/,/^}/p' "$ROOT/fix-mr.sh")"
+eval "$(sed -n '/^marker_lines() {/,/^}/p' "$ROOT/fix-mr.sh")"
 
 echo
 echo "resolver scope:"
@@ -100,6 +101,22 @@ check "a stray >>>>>>> is a leftover" "1" "$ml"
 printf 'resolved\n' > conflict.txt
 if markers_left conflict.txt; then ml=1; else ml=0; fi
 check "a clean resolution has no leftovers" "0" "$ml"
+printf 'resolved\r\n=======\r\n' > conflict.txt
+if markers_left conflict.txt; then ml=1; else ml=0; fi
+check "a stray =======<CR> in a CRLF file is a leftover" "1" "$ml"
+git reset -q --hard
+
+# both sides append a section with a 7-character setext underline: the union
+# has one more "=======" than either side, and is still a clean resolution
+git checkout -qb docs-theirs
+printf '# Doc\n\nTesting\n=======\n' > notes.md; git add notes.md; git commit -qm theirs-docs
+git checkout -q -
+printf '# Doc\n\nInstall\n=======\n' > notes.md; git add notes.md; git commit -qm ours-docs
+git -c merge.conflictStyle=zdiff3 merge -q docs-theirs >/dev/null 2>&1
+printf '# Doc\n\nInstall\n=======\n\nTesting\n=======\n' > notes.md
+if markers_left notes.md; then ml=1; else ml=0; fi
+check "both sides' setext underlines are not leftovers" "0" "$ml"
+git reset -q --hard
 cd "$ROOT" || exit 1
 
 # ── deadlines: nothing a fixer starts may run forever ───────────────────────
@@ -130,13 +147,32 @@ pkill -f 'sleep 4711' 2>/dev/null
 mm_timeout 0 true; rc=$?
 check "0 seconds means no limit"               "0" "$rc"
 
+# a function whose child ignores TERM: the KILL that follows must reach it,
+# although the function's own subshell dies on the TERM
+# shellcheck disable=SC2329,SC2317  # invoked through mm_timeout
+stubborn_step() { bash -c 'trap "" TERM; sleep 4712; :' 2>/dev/null; }
+SECONDS=0
+mm_timeout 1 stubborn_step; rc=$?
+check "a TERM-ignoring step still times out"   "124" "$rc"
+if pgrep -f 'sleep 4712' >/dev/null 2>&1; then left=1; else left=0; fi
+check "…and is gone when mm_timeout returns"   "0" "$left"
+check "…within the TERM grace period"          "1" "$(( SECONDS <= 8 ? 1 : 0 ))"
+pkill -KILL -f 'sleep 4712' 2>/dev/null
+
+check "a deadline in whole seconds is kept"    "600" "$(mm_secs 600 900)"
+check "0 keeps meaning no deadline"            "0" "$(mm_secs 0 900)"
+check "\"15m\" falls back to the default"      "900" "$(mm_secs 15m 900)"
+check "empty falls back to the default"        "900" "$(mm_secs '' 900)"
+
 # ── counting fixers: one fixer, however many times it has forked ───────────
 echo
 echo "fixer count:"
 FAKE_ROOT="$TMP/mm-root"
-bash -c "exec -a 'bash $FAKE_ROOT/fix-mr.sh 7 feat-7 main' bash -c '( sleep 3 ) & ( sleep 3 ) & wait'" 2>/dev/null &
+bash -c "exec -a 'bash $FAKE_ROOT/fix-mr.sh 7 feat-7 main' bash -c '( sleep 3; : ) & ( sleep 3; : ) & wait'" 2>/dev/null &
 fake=$!
 sleep 0.5
+raw="$(pgrep -f "$FAKE_ROOT/fix-mr.sh" | wc -l | tr -d ' ')"
+check "the fake fixer really shows as several processes" "1" "$(( raw > 1 ? 1 : 0 ))"
 check "a fixer with two subshells counts once" "1" "$(mm_fixer_count "$FAKE_ROOT")"
 mm_kill_tree "$fake" TERM; wait "$fake" 2>/dev/null
 check "no fixer, no count"                     "0" "$(mm_fixer_count "$FAKE_ROOT")"

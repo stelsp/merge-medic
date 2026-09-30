@@ -72,18 +72,42 @@ mm_src_is_auto() {
   mm_glob_match "$1" "${AUTO_BRANCHES:-feat-*}" >/dev/null
 }
 
-# mm_kill_tree <pid> <signal> — signal a process and everything it started,
-# children first, so none is re-parented out of reach halfway through.
-mm_kill_tree() {
+# mm_tree_pids <pid> — the process and everything it started, children first.
+mm_tree_pids() {
   local c
-  for c in $(pgrep -P "$1" 2>/dev/null); do mm_kill_tree "$c" "$2"; done
-  kill "-$2" "$1" 2>/dev/null || true
+  for c in $(pgrep -P "$1" 2>/dev/null); do mm_tree_pids "$c"; done
+  printf '%s\n' "$1"
+}
+
+# mm_kill_tree <pid> <signal> — signal a process and everything it started.
+# The tree is listed before the first signal: a child whose parent dies is
+# re-parented, and a walk that starts from the dead parent no longer finds it.
+mm_kill_tree() {
+  local p
+  for p in $(mm_tree_pids "$1"); do kill "-$2" "$p" 2>/dev/null || true; done
+}
+
+# mm_stop_tree <pid>... — stop processes and everything they started: TERM,
+# up to 5s to exit, then KILL for whatever is still there (a step that traps
+# TERM, a docker CLI waiting on its container). Returns once all are gone.
+mm_stop_tree() {
+  local root pids="" p n=0 alive
+  for root in "$@"; do pids="$pids $(mm_tree_pids "$root" | tr '\n' ' ')"; done
+  for p in $pids; do kill -TERM "$p" 2>/dev/null || true; done
+  while [ "$n" -lt 25 ]; do
+    alive=0
+    for p in $pids; do if kill -0 "$p" 2>/dev/null; then alive=1; break; fi; done
+    [ "$alive" = 0 ] && return 0
+    sleep 0.2; n=$((n + 1))
+  done
+  for p in $pids; do kill -0 "$p" 2>/dev/null && mm_kill_tree "$p" KILL; done
+  return 0
 }
 
 # mm_timeout <seconds> <command...> — run the command (a function works too);
-# if it is still running after <seconds>, stop it and everything it started:
-# TERM, then KILL 5s later. Returns the command's status, or 124 on timeout
-# (GNU timeout's convention). Empty or 0 seconds = no limit.
+# if it is still running after <seconds>, stop it and everything it started
+# (mm_stop_tree) before returning 124, GNU timeout's code. Otherwise returns
+# the command's own status. Empty or 0 seconds = no limit.
 # macOS ships no timeout(1), and timeout(1) could not run a shell function.
 # The command runs in the background, so its stdin is /dev/null — nothing a
 # fixer runs unattended should be waiting for input anyway.
@@ -95,17 +119,34 @@ mm_timeout() {
   fired="$(mktemp "${TMPDIR:-/tmp}/mm-timeout.XXXXXX")" && rm -f "$fired"
   "$@" &
   pid=$!
-  # the watchdog must not hold the caller's stdout: inside $( ) that would
-  # keep the substitution waiting for the full timeout
-  ( sleep "$secs"; : > "$fired"
-    mm_kill_tree "$pid" TERM; sleep 5; mm_kill_tree "$pid" KILL ) >/dev/null 2>&1 &
+  # The watchdog fires only if its sleep ran out AND the command is still
+  # there: when the command finishes first, the sleep is killed, and the
+  # `&&` chain must stop right there instead of reporting a timeout.
+  # It must not hold the caller's stdout either: inside $( ) that would keep
+  # the substitution waiting for the full deadline.
+  ( sleep "$secs" && kill -0 "$pid" 2>/dev/null && : > "$fired" && mm_stop_tree "$pid" ) \
+    >/dev/null 2>&1 &
   wd=$!
   # (2>/dev/null: bash's own "Terminated" job notice, not the command's output)
   wait "$pid" 2>/dev/null || rc=$?
+  if [ -e "$fired" ]; then
+    # timed out: let the watchdog finish, so nothing the step started is
+    # still running (or still writing into its worktree) when we return
+    wait "$wd" 2>/dev/null || true
+    rm -f "$fired"
+    return 124
+  fi
   mm_kill_tree "$wd" TERM
   wait "$wd" 2>/dev/null || true
-  if [ -e "$fired" ]; then rm -f "$fired"; return 124; fi
+  rm -f "$fired"
   return "$rc"
+}
+
+# mm_secs <value> <default> — a deadline from hand-edited config: a whole
+# number of seconds, 0 for none. Anything else ("15m", "1.5", empty) falls
+# back to the default instead of silently meaning "no deadline".
+mm_secs() {
+  case "$1" in ''|*[!0-9]*) printf '%s' "$2" ;; *) printf '%s' "$1" ;; esac
 }
 
 # mm_fixer_count <root> — how many fixers are running. A fixer forks while it

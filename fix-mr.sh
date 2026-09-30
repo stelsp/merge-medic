@@ -17,6 +17,9 @@ source "$ROOT/config.env"
 source "$ROOT/lib.sh"
 
 IID="$1"; SRC="$2"; TGT="$3"; TITLE="${4:-}"; MODE="${5:-auto}"
+RESOLVER_TIMEOUT="$(mm_secs "${RESOLVER_TIMEOUT:-}" 900)"
+GATE_TIMEOUT="$(mm_secs "${GATE_TIMEOUT:-}" 1800)"
+NET_TIMEOUT="$(mm_secs "${NET_TIMEOUT:-}" 300)"
 SIGIL="$(mm_ref_sigil)"
 PROG="$ROOT/state/progress-$IID.log"
 LOGDIR="$ROOT/logs"; mkdir -p "$LOGDIR" "$ROOT/worktrees" "$ROOT/state"
@@ -67,7 +70,15 @@ run_gate() {
   fail "$phase red ($(rc_text "$rc"), fixer-$IID.log)"
 }
 notify() { mm_notify "$@"; }
-cleanup_wt() { git -C "$WATCH_REPO" worktree remove --force "$WT" 2>/dev/null || true; }
+cleanup_wt() {
+  git -C "$WATCH_REPO" worktree remove --force "$WT" 2>/dev/null || true
+  # a directory left at $WT that git does not know as a worktree (something
+  # wrote into it after it was removed) would fail every later worktree add
+  if [ -e "$WT" ]; then
+    rm -rf "$WT"
+    git -C "$WATCH_REPO" worktree prune 2>/dev/null || true
+  fi
+}
 # Durable all-time ledger (progress files get overwritten per run):
 # ts|iid|OUTCOME|mode  where mode = none|clean|ai
 resolve_mode="none"
@@ -263,7 +274,7 @@ open_resolution_mr() {
 
 # index_snapshot: every merged (stage 0) index entry as "mode blob 0<TAB>path".
 index_snapshot() {
-  git ls-files -s | awk '$3 == 0'
+  git -c core.quotePath=false ls-files -s | awk '$3 == 0'
 }
 
 # out_of_scope <snapshot> <allowed paths, one per line>: prints every path
@@ -276,23 +287,25 @@ out_of_scope() {
     | grep -vxF -f <(printf '%s\n' "$allowed" | sed '/^$/d') || true
 }
 
-# markers_left <file>: true when the file has more conflict-marker lines of
-# any kind than either side of the merge had on its own. Counting against
-# both sides keeps files that legitimately contain marker-like lines (test
-# fixtures, docs about git) resolvable, and still catches a stray =======
-# or >>>>>>> that a "<<<<<<< only" check lets through into a .md or .sql
-# file, where no build or test would notice it.
+# markers_left <file>: true when the resolved file still holds a conflict
+# marker that neither side of the merge has at that place. `git diff --check`
+# reports the marker lines a diff adds; a line added relative to BOTH parents
+# came from neither of them, so it is a leftover. A marker-like line that one
+# side really has (a fixture, a docs example, a 7-character setext underline)
+# is added relative to one parent at most, and survives. CRLF files included.
 markers_left() {
-  local f="$1" re now ours theirs
-  for re in '^<<<<<<< ' '^||||||| ' '^=======$' '^>>>>>>> '; do
-    now="$(grep -c -e "$re" -- "$f" 2>/dev/null || true)"
-    ours="$(git show "HEAD:$f" 2>/dev/null | grep -c -e "$re" || true)"
-    theirs="$(git show "MERGE_HEAD:$f" 2>/dev/null | grep -c -e "$re" || true)"
-    if [ "${now:-0}" -gt "${ours:-0}" ] && [ "${now:-0}" -gt "${theirs:-0}" ]; then
-      return 0
-    fi
-  done
-  return 1
+  local f="$1" vs_ours vs_theirs
+  vs_ours="$(marker_lines HEAD "$f")"
+  [ -n "$vs_ours" ] || return 1
+  vs_theirs="$(marker_lines MERGE_HEAD "$f")"
+  [ -n "$vs_theirs" ] || return 1
+  grep -qxF -f <(printf '%s\n' "$vs_theirs") <<<"$vs_ours"
+}
+# marker_lines <commit> <file>: line numbers of the marker lines the file
+# adds compared with <commit>, one per line
+marker_lines() {
+  git diff --check "$1" -- "$2" 2>/dev/null \
+    | sed -n 's/^.*:\([0-9][0-9]*\): leftover conflict marker$/\1/p' || true
 }
 
 # ── no silent deaths ──────────────────────────────────────────────────────────
@@ -303,24 +316,28 @@ markers_left() {
 # frozen on the last phase, and with the SHA pair already marked tried,
 # nothing that would ever retry it. Such an exit is recorded as a failure.
 MM_LEDGER=""        # set by ledger(): the run recorded how it ended
-MM_ERR_LINE=""
+MM_ERR_CMD=""
 MM_HOLD_BUDGET=0    # 1 while this run holds the budget lock
 on_exit() {
-  local rc="$1" c
+  local rc="$1" kids
   set +e
   [ "$MM_HOLD_BUDGET" = 1 ] && rmdir "$ROOT/state/.budget.lock" 2>/dev/null
   [ "$rc" = 0 ] && return 0
   # a TERM or a crash can land mid-step: stop whatever that step started
   # (a resolver still editing, a test run) before its worktree goes away
-  for c in $(pgrep -P $$ 2>/dev/null); do mm_kill_tree "$c" TERM; done
+  kids="$(pgrep -P $$ 2>/dev/null | tr '\n' ' ')"
+  # shellcheck disable=SC2086  # one pid per word
+  [ -n "$kids" ] && mm_stop_tree $kids
   [ -n "$MM_LEDGER" ] && return 0
-  ev FAIL "fixer died unexpectedly ($(rc_text "$rc")${MM_ERR_LINE:+ at fix-mr.sh:$MM_ERR_LINE}) — see fixer-$IID.log"
+  ev FAIL "fixer died unexpectedly ($(rc_text "$rc")${MM_ERR_CMD:+ in: $(printf '%s' "$MM_ERR_CMD" | mm_clean | cut -c1-80)}) — see fixer-$IID.log"
   ledger FAIL
   notify "${SIGIL}$IID: fix failed" "fixer died unexpectedly ($(rc_text "$rc"))"
   cleanup_wt
 }
 set -E
-trap 'MM_ERR_LINE=$LINENO' ERR
+# (the failing command, not $LINENO: bash 3.2 reports the enclosing block's
+# closing line there)
+trap 'MM_ERR_CMD=$BASH_COMMAND' ERR
 trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'on_exit $?' EXIT
@@ -455,7 +472,10 @@ if git -c merge.conflictStyle=zdiff3 merge --no-ff --no-edit \
     exit 0
   fi
 else
-  conflicts="$(git diff --name-only --diff-filter=U)"
+  # quotePath=false: git would otherwise print any non-ASCII name as a
+  # "C-quoted" string, which neither the escalation globs nor the file checks
+  # below can match
+  conflicts="$(git -c core.quotePath=false diff --name-only --diff-filter=U)"
   [ -z "$conflicts" ] && fail "merge failed without conflicting files"
   n="$(printf '%s\n' "$conflicts" | grep -c .)"
 
@@ -466,6 +486,12 @@ else
   if [ "$MODE" != "fix-approved" ]; then
     while IFS= read -r f; do
       [ -n "$f" ] || continue
+      # still quoted (a quote, backslash or control character in the name):
+      # no check below can be trusted with it
+      case "$f" in
+        \"*) git merge --abort 2>/dev/null || true
+             escalate "policy · $f has a name git has to quote — resolve it by hand" ;;
+      esac
       if pat="$(mm_glob_match "$f" "${ESCALATE_PATTERNS:-}")"; then
         git merge --abort 2>/dev/null || true
         escalate "policy · protected path $f matches ESCALATE_PATTERNS '$pat'"
