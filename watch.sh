@@ -186,12 +186,7 @@ consider() {
   # allowlist: when INCLUDE_BRANCHES is set, only matching source branches
   # are handled at all (globs, space-separated); empty = every branch
   if [ -n "${INCLUDE_BRANCHES:-}" ]; then
-    local inc ok=0
-    for inc in $INCLUDE_BRANCHES; do
-      # shellcheck disable=SC2254
-      case "$src" in $inc) ok=1;; esac
-    done
-    if [ "$ok" != "1" ]; then
+    if ! mm_glob_match "$src" "$INCLUDE_BRANCHES" >/dev/null; then
       SK_INCL=$((SK_INCL + 1)); skip_once "$iid" "incl" "filtered · '$src' matches no INCLUDE_BRANCHES glob"; return 0
     fi
   fi

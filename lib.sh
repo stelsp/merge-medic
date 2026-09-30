@@ -45,15 +45,31 @@ mm_ref_sigil() {
   if mm_is_github; then printf '#'; else printf '!'; fi
 }
 
+# mm_glob_match <string> <globs> — print the first of the space-separated
+# globs that matches <string> and succeed; fail when none does.
+# Pathname expansion is off while the list is split. An unquoted
+# `for g in $globs` expands "src/auth/*" against whatever directory the
+# caller stands in, and the case test then compares the string with the
+# names found there instead of with the glob: "src/auth/sub/x.ts" silently
+# stops matching. In a case pattern `*` also matches "/", so a glob covers
+# the whole subtree.
+mm_glob_match() {
+  local s="$1" globs="$2" g hit="" was_noglob=0
+  case "$-" in *f*) was_noglob=1 ;; esac
+  set -f
+  for g in $globs; do
+    # shellcheck disable=SC2254  # unquoted on purpose: $g is the glob
+    case "$s" in $g) hit="$g"; break ;; esac
+  done
+  [ "$was_noglob" = 1 ] || set +f
+  [ -n "$hit" ] || return 1
+  printf '%s\n' "$hit"
+}
+
 # True when branch $1 matches any glob in AUTO_BRANCHES (default feat-*) —
 # such sources are fixed fully automatically, everything else needs approval.
 mm_src_is_auto() {
-  local src="$1" ab
-  for ab in ${AUTO_BRANCHES:-feat-*}; do
-    # shellcheck disable=SC2254  # unquoted on purpose: $ab is the glob
-    case "$src" in $ab) return 0;; esac
-  done
-  return 1
+  mm_glob_match "$1" "${AUTO_BRANCHES:-feat-*}" >/dev/null
 }
 
 # Squeeze foreign text (git stderr, test output) into one safe log detail:

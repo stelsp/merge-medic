@@ -244,7 +244,7 @@ Everything lives in `config.env` (gitignored; seeded from
 | `TRUSTED_AUTHORS` | usernames whose plan comments the approved run obeys (default: the MR author only) |
 | `RESOLVE_POLICY_FILE` | project-specific resolution rules appended to the prompt |
 | `AUTO_BRANCHES` | source-branch globs fixed fully automatically (default `feat-*`); any other source gets the semi-auto flow: plan → MR comment → human approve (`a` in the dashboard) → fix that reads your comments |
-| `ESCALATE_PATTERNS` | glob paths the bot must never resolve |
+| `ESCALATE_PATTERNS` | glob paths the bot must never resolve; a glob covers subdirectories (`src/auth/*` protects everything under `src/auth/`) |
 | `POST_RESOLUTION_NOTE` | `1` = comment the resolver's reasoning on the MR/PR |
 | `QUIET_MINUTES` | defer the fix while the source branch had a push this recently (retried every tick; `0` disables) |
 | `USER_REPOS` | local checkouts to inspect — uncommitted work on the branch there also defers the fix |

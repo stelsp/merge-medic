@@ -7,11 +7,12 @@ test:
 	go test ./...
 	bash tests/watcher_state.sh
 	bash tests/rules.sh
+	bash tests/fixer_guards.sh
 
 clean:
 	rm -f bin/mrtop
 
 lint:
-	shellcheck watch.sh fix-mr.sh lib.sh bin/mrwatch install.sh uninstall.sh get.sh docs/demo-state.sh tests/watcher_state.sh tests/rules.sh
+	shellcheck watch.sh fix-mr.sh lib.sh bin/mrwatch install.sh uninstall.sh get.sh docs/demo-state.sh tests/watcher_state.sh tests/rules.sh tests/fixer_guards.sh
 	gofmt -l cmd/
 	go vet ./...

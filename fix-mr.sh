@@ -336,17 +336,17 @@ else
 
   # ── hard escalation zones: the bot never decides here ───────────────────────
   # (an approved re-run is a human decision — the zones are theirs to open)
-  [ "$MODE" != "fix-approved" ] && for f in $conflicts; do
-    for pat in ${ESCALATE_PATTERNS:-}; do
-      # shellcheck disable=SC2254
-      case "$f" in
-        $pat)
-          git merge --abort 2>/dev/null || true
-          escalate "policy · protected path $f matches ESCALATE_PATTERNS '$pat'"
-          ;;
-      esac
-    done
-  done
+  # mm_glob_match, not an unquoted loop: expanded in this worktree, a pattern
+  # like "src/auth/*" would only ever match the files directly in src/auth.
+  if [ "$MODE" != "fix-approved" ]; then
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      if pat="$(mm_glob_match "$f" "${ESCALATE_PATTERNS:-}")"; then
+        git merge --abort 2>/dev/null || true
+        escalate "policy · protected path $f matches ESCALATE_PATTERNS '$pat'"
+      fi
+    done <<<"$conflicts"
+  fi
 
   # ── deterministic rules: close what needs no judgement, for free ───────────
   # Stamp lines every branch rewrites ("> verified: <sha>" and friends)
