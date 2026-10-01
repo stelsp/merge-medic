@@ -440,7 +440,9 @@ restore_untouched() {
         [ -e "$p" ] || [ -L "$p" ] || git update-index --cacheinfo "$emode,$eblob,$p"
         continue
       fi
-      { [ "$emode" = 100644 ] || [ "$emode" = 100755 ]; } && [ -f "$p" ] && [ ! -L "$p" ] || continue
+      if { [ "$emode" != 100644 ] && [ "$emode" != 100755 ]; } || [ ! -f "$p" ] || [ -L "$p" ]; then
+        continue
+      fi
       if [ -x "$p" ]; then x=100755; else x=100644; fi
       [ "$x" = "$emode" ] || continue
       if git cat-file --filters --path="$p" "$eblob" 2>/dev/null | cmp -s - "$p"; then
