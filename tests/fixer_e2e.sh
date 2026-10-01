@@ -68,7 +68,7 @@ export MM_FAKE_CALLED="$TMP/fake-called"
 REMOTE="$TMP/remote.git"
 # new_repo <kind>: a remote whose feat-1 conflicts with main, and a fresh
 # watch clone. kind: plain | protected | quoted | stamp | moddel | crlf |
-# exec | symlink
+# exec | symlink | renamed | renamed-theirs | dirrenamed
 new_repo() {
   rm -rf "$REMOTE" "$TMP/seed" "$TMP/watch" "$MM/state" "$MM/logs" "$MM/worktrees"
   git init -q --bare "$REMOTE"
@@ -85,6 +85,7 @@ new_repo() {
     printf 'base\n' > kept.txt
     printf '#!/bin/sh\n# verified: 0000000\necho run\n' > run.sh; chmod +x run.sh
     ln -s old.md docs/a-link.md
+    seq 1 12 | sed 's/^/line /' > apps/auth/session.ts
     printf 'one\r\ntwo\r\n' > crlf.txt
     git add -A; git commit -qm base
     if [ "$1" = crlf ]; then
@@ -104,6 +105,11 @@ new_repo() {
       exec)      printf '#!/bin/sh\n# verified: bbbb222\necho run\n' > run.sh ;;
       symlink)   printf '# Doc\n> verified: bbbb222\nbody\n' > docs/arch.md
                  ln -sfn main.md docs/a-link.md ;;
+      renamed)   sed -i.bak 's/^line 6$/line 6 main/' apps/auth/session.ts; rm -f apps/auth/session.ts.bak ;;
+      renamed-theirs)
+                 mkdir -p apps/core; git mv apps/auth/session.ts apps/core/session.ts
+                 sed -i.bak 's/^line 6$/line 6 main/' apps/core/session.ts; rm -f apps/core/session.ts.bak ;;
+      dirrenamed) git mv apps/auth apps/core ;;
     esac
     # (crlf.txt stays exactly as committed: staging it would normalize it)
     git add -A -- . ':(exclude)crlf.txt'; git commit -qm "main side"
@@ -119,6 +125,11 @@ new_repo() {
       exec)      printf '#!/bin/sh\n# verified: aaaa111\necho run\n' > run.sh ;;
       symlink)   printf '# Doc\n> verified: aaaa111\nbody\n' > docs/arch.md
                  ln -sfn arch.md docs/a-link.md ;;
+      renamed)   mkdir -p apps/core; git mv apps/auth/session.ts apps/core/session.ts
+                 sed -i.bak 's/^line 6$/line 6 feat/' apps/core/session.ts; rm -f apps/core/session.ts.bak ;;
+      renamed-theirs)
+                 sed -i.bak 's/^line 6$/line 6 feat/' apps/auth/session.ts; rm -f apps/auth/session.ts.bak ;;
+      dirrenamed) printf 'new\n' > apps/auth/new.ts ;;
     esac
     # (crlf.txt stays exactly as committed: staging it would normalize it)
     git add -A -- . ':(exclude)crlf.txt'; git commit -qm "feat side"
@@ -273,6 +284,16 @@ check "…and stays a symlink"                     "120000" \
   "$(git --git-dir "$REMOTE" ls-tree feat-1 docs/a-link.md | cut -d' ' -f1)"
 check "…while the file it points to is still decided by rules" "> verified: aaaa111" \
   "$(git --git-dir "$REMOTE" show feat-1:docs/arch.md | grep verified)"
+
+# ── a protected file under another name ─────────────────────────────────────
+new_repo renamed; write_config; MM_FAKE=resolve run_fixer
+check "a protected file our side renamed escalates" "ESCALATED/0" "$OUTCOME/$CALLED"
+new_repo renamed-theirs; write_config; MM_FAKE=resolve run_fixer
+check "…and one their side renamed"              "ESCALATED/0" "$OUTCOME/$CALLED"
+# their side moved the protected directory, ours added a file to it: git
+# moves the file along and reports it under the new directory's name
+new_repo dirrenamed; write_config; MM_FAKE=resolve run_fixer
+check "…and a file added where a renamed protected directory was" "ESCALATED/0" "$OUTCOME/$CALLED"
 
 # ── hooks and signing are config's call ─────────────────────────────────────
 hooks_say_no() {

@@ -451,6 +451,23 @@ regular_conflict() {
   [ -f "$1" ] && [ ! -L "$1" ]
 }
 
+# side_renames: "old<TAB>new" for every rename either side made since the
+# merge base, found the way the merge finds them. A conflict is reported
+# under one name only: when a branch moved a protected file elsewhere, that
+# name is not the protected one.
+side_renames() {
+  local side limit
+  [ -n "$MERGE_BASE" ] || return 0
+  # as many candidates as the merge itself weighs
+  limit="$(git config --get merge.renameLimit || git config --get diff.renameLimit || echo 7000)"
+  for side in "origin/$SRC" "origin/$TGT"; do
+    git -c core.quotePath=false -c diff.renameLimit="$limit" \
+        diff --name-status -M --diff-filter=R "$MERGE_BASE" "$side" 2>/dev/null \
+      | awk -F'\t' 'NF == 3 { print $2 "\t" $3 }'
+  done
+  return 0
+}
+
 # ── the resolver leaves git itself alone ──────────────────────────────────────
 # It may edit and stage files. Changing how git behaves is another matter: an
 # alias, a hooks path or a push URL in config, a hook, a branch or tag. All of
@@ -703,7 +720,12 @@ else
   # (an approved re-run is a human decision — the zones are theirs to open)
   # mm_glob_match, not an unquoted loop: expanded in this worktree, a pattern
   # like "src/auth/*" would only ever match the files directly in src/auth.
+  # A path counts as protected under any name it had on either side: a
+  # branch that moved a protected file elsewhere gets the conflict reported
+  # under the new, unprotected name.
   if [ "$MODE" != "fix-approved" ]; then
+    renames=""
+    [ -z "${ESCALATE_PATTERNS:-}" ] || renames="$(side_renames)"
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       # still quoted (a quote, backslash or control character in the name):
@@ -712,10 +734,27 @@ else
         \"*) git merge --abort 2>/dev/null || true
              escalate "policy · $f has a name git has to quote — resolve it by hand" ;;
       esac
-      if pat="$(mm_glob_match "$f" "${ESCALATE_PATTERNS:-}")"; then
-        git merge --abort 2>/dev/null || true
-        escalate "policy · protected path $f matches ESCALATE_PATTERNS '$pat'"
-      fi
+      # the path itself; the file under the name it had on the other side;
+      # and a file placed in a directory the other side renamed, which git
+      # moves along ("file location"), under the directory's old name
+      names="$(printf '%s\n' "$f"; F="$f" awk -F'\t' '
+        $1 == ENVIRON["F"] { print $2 }
+        $2 == ENVIRON["F"] { print $1 }
+        { o = $1; n = $2; f = ENVIRON["F"]
+          if (sub(/\/[^\/]*$/, "", o) && sub(/\/[^\/]*$/, "", n) && o != n) {
+            if (index(f, n "/") == 1) print o substr(f, length(n) + 1)
+            if (index(f, o "/") == 1) print n substr(f, length(o) + 1)
+          } }' <<<"$renames" | LC_ALL=C sort -u)"
+      while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        if pat="$(mm_glob_match "$name" "${ESCALATE_PATTERNS:-}")"; then
+          git merge --abort 2>/dev/null || true
+          if [ "$name" = "$f" ]; then
+            escalate "policy · protected path $f matches ESCALATE_PATTERNS '$pat'"
+          fi
+          escalate "policy · $f is protected path $name under another name (ESCALATE_PATTERNS '$pat')"
+        fi
+      done <<<"$names"
     done <<<"$conflicts"
   fi
 
