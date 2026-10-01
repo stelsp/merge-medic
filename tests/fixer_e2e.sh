@@ -41,6 +41,11 @@ case "$MM_FAKE" in
   crash)     printf 'resolved\n' > conflict.txt; git add conflict.txt
              : > "$(git rev-parse --git-dir)/index.lock" ;;   # the fixer's own git add dies
   keepfile)  git add kept.txt ;;
+  # pushes from inside the resolver, in every disguise a shell allows
+  pushy)     git push -q origin HEAD:refs/heads/pwn-plain
+             git -C . push -q origin HEAD:refs/heads/pwn-dash-c
+             git -c alias.p='!git push -q origin HEAD:refs/heads/pwn-alias' p
+             printf 'resolved\n' > conflict.txt; git add conflict.txt ;;
   link)      git checkout --ours -- docs/a-link.md; git add docs/a-link.md ;;
 esac
 EOF
@@ -192,6 +197,13 @@ new_repo moddel; write_config "RULES_KEEP_OURS='^> verified: '"; MM_FAKE=keepfil
 check "a modify/delete conflict goes to the resolver" "DONE/ai/1" "$OUTCOME/$MODE_USED/$CALLED"
 check "…with the marker-shaped fixture in it intact" "1" \
   "$(git --git-dir "$REMOTE" show feat-1:kept.txt | grep -c '^<<<<<<< HEAD$')"
+
+# ── the resolver's fence ─────────────────────────────────────────────────────
+# no push from inside the resolver reaches the remote, however it is spelled
+new_repo plain; write_config; MM_FAKE=pushy run_fixer
+check "pushes from inside the resolver go nowhere" "" \
+  "$(git --git-dir "$REMOTE" for-each-ref --format='%(refname)' refs/heads/pwn-plain refs/heads/pwn-dash-c refs/heads/pwn-alias)"
+check "…and the run itself still lands"          "DONE" "$OUTCOME"
 
 # ── the rules layer reads regular files only, and writes them back in place ──
 new_repo exec; write_config "RULES_KEEP_OURS='^> verified: |^# verified: '"; MM_FAKE=resolve run_fixer

@@ -145,32 +145,75 @@ record_tokens() { # $1 = claude --output-format json result file
   ' "$1" >> "$ROOT/state/tokens.log" 2>/dev/null || true
 }
 
+# ── what the claude resolver may do ───────────────────────────────────────────
+# The resolver is a model reading text from the branches it merges, run with
+# the push rights of whoever installed merge-medic. It used to be allowed
+# Bash(git:*), and `git -C . push`, an alias defined with -c, or a pager or
+# hook set in config ran anything at all. Now the CLI loads none of the
+# user's settings, hooks, plugins or MCP servers (--restricted,
+# --strict-mcp-config), offers no tool but the file tools and Bash, denies
+# whatever is not allowed below without asking anyone, and Bash may run only
+# the git commands a resolution needs (tests/fixer_guards.sh pins the rules).
+#
+# claude_args <plan|resolve>: the permission flags, one argument per line
+claude_args() {
+  local c
+  if [ "$1" = "plan" ]; then
+    printf '%s\n' --tools "Read,Glob,Grep,Bash"
+  else
+    printf '%s\n' --tools "Read,Edit,Write,Glob,Grep,Bash"
+  fi
+  printf '%s\n' --restricted --strict-mcp-config \
+    --permission-mode dontAsk --permission-prompts none --allowedTools Read Glob Grep
+  [ "$1" = "plan" ] || printf '%s\n' Edit Write
+  # reading git. Not every `git diff` though: given two paths, one of them
+  # outside the repository, git falls back to --no-index and prints any file
+  # on the machine. Against a revision or the index it never does.
+  for c in status log show; do printf 'Bash(git %s)\nBash(git %s *)\n' "$c" "$c"; done
+  printf '%s\n' 'Bash(git diff)' 'Bash(git diff --cached)' 'Bash(git diff --cached *)' \
+    'Bash(git diff HEAD)' 'Bash(git diff HEAD *)' 'Bash(git diff MERGE_HEAD)' 'Bash(git diff MERGE_HEAD *)'
+  if [ "$1" != "plan" ]; then
+    printf '%s\n' 'Bash(git add *)' 'Bash(git rm *)' \
+      'Bash(git checkout --ours *)' 'Bash(git checkout --theirs *)'
+  fi
+  # Denied in both modes even though nothing above allows them: a deny rule
+  # wins over any allow rule, should one ever come from somewhere else.
+  # --output writes a diff or log to any path on the machine, a redirection
+  # writes anything anywhere, --no-index reads any file, and
+  # --pathspec-from-file reads one too (git quotes its lines back in errors).
+  printf '%s\n' --disallowedTools \
+    'Bash(git push)' 'Bash(git push *)' 'Bash(git * push)' 'Bash(git * push *)' \
+    'Bash(git -c *)' 'Bash(git -C *)' 'Bash(git --*)' 'Bash(git config *)' \
+    'Bash(*--output*)' 'Bash(*>*)' 'Bash(*--no-index*)' 'Bash(*--pathspec-from-file*)'
+}
+
 # ── resolver abstraction: claude (default) | aider | custom ───────────────────
 # resolver_call <plan|resolve> <prompt> <errlog>
 # Runs the configured agent in the current worktree. Prints the agent's final
 # answer text to stdout, returns its exit code. "plan" must not edit files.
 # Token/cost accounting only where the provider reports it (claude).
+# Whatever the resolver is and whatever it manages to run, git cannot reach
+# a remote from inside it: GIT_ALLOW_PROTOCOL overrides every config and -c,
+# and "none" names no protocol, so fetch, push and clone all refuse.
 resolver_call() {
+  evx RESOLVER "info · ${RESOLVER:-claude} ${CLAUDE_MODEL:-${RESOLVER_MODEL:-}} · $1"
+  ( export GIT_ALLOW_PROTOCOL=none
+    resolver_run "$@" )
+}
+resolver_run() {
   local mode="$1" prompt="$2" errlog="$3" rc=0 out
-  evx RESOLVER "info · ${RESOLVER:-claude} ${CLAUDE_MODEL:-${RESOLVER_MODEL:-}} · $mode"
   case "${RESOLVER:-claude}" in
     claude)
-      local tools dtools
-      if [ "$mode" = "plan" ]; then
-        tools="Read Grep Glob Bash(git:*)"
-        dtools="Edit Write WebFetch WebSearch Bash(curl:*) Bash(rm:*)"
-      else
-        tools="Read Edit Write Glob Grep Bash(git:*)"
-        dtools="WebFetch WebSearch Bash(curl:*) Bash(rm:*) Bash(git push:*)"
-      fi
-      out="$(mktemp)"
-      claude -p "$prompt" \
-        --model "${CLAUDE_MODEL:-opus}" \
-        --permission-mode acceptEdits \
-        --allowedTools "$tools" \
-        --disallowedTools "$dtools" \
-        --add-dir "$WT" \
-        --output-format json > "$out" 2>>"$errlog" || rc=$?
+      local -a cli
+      local arg
+      cli=(claude -p "$prompt" --model "${CLAUDE_MODEL:-opus}" --add-dir "$WT" --output-format json)
+      [ -n "${CLAUDE_EFFORT:-}" ] && cli+=(--effort "$CLAUDE_EFFORT")
+      # --restricted reads no settings file of the user's: auth or provider
+      # setup kept in one (apiKeyHelper, env) has to be handed over here
+      [ -n "${CLAUDE_SETTINGS:-}" ] && cli+=(--settings "$CLAUDE_SETTINGS")
+      while IFS= read -r arg; do cli+=("$arg"); done < <(claude_args "$mode")
+      out="$(mktemp "$MM_TMP/claude.XXXXXX")"
+      "${cli[@]}" > "$out" 2>>"$errlog" || rc=$?
       jq -r '.result // empty' "$out" 2>/dev/null || true
       record_tokens "$out"
       # side note for the live rail: what this call actually cost
@@ -199,7 +242,7 @@ resolver_call() {
       # runs in the worktree, must edit files itself and exit 0 on success.
       [ -n "${RESOLVER_CMD:-}" ] || { echo "RESOLVER=custom but RESOLVER_CMD is empty" >>"$errlog"; return 78; }
       local pf cmd
-      pf="$(mktemp)"; printf '%s' "$prompt" > "$pf"
+      pf="$(mktemp "$MM_TMP/prompt.XXXXXX")"; printf '%s' "$prompt" > "$pf"
       cmd="${RESOLVER_CMD//\{prompt_file\}/$pf}"
       cmd="${cmd//\{mode\}/$mode}"
       ( eval "$cmd" ) 2>>"$errlog" || rc=$?
@@ -621,12 +664,23 @@ else
     fi
   fi
 
+  # the claude resolver is told what its permissions let it run, so it does
+  # not spend turns on commands that are refused anyway
+  tool_note=""
+  if [ "${RESOLVER:-claude}" = "claude" ]; then
+    if [ "$MODE" = "plan" ]; then
+      tool_note="Your shell runs read-only git only: status, log, show, and diff alone or against --cached, HEAD or MERGE_HEAD."
+    else
+      tool_note="Your shell runs only these git commands: status, log, show, diff (alone or against --cached, HEAD or MERGE_HEAD), add, rm, checkout --ours, checkout --theirs. Anything else is refused."
+    fi
+  fi
+
   # ── plan mode: describe the resolution, post it, wait for a human ───────────
   if [ "$MODE" = "plan" ]; then
     ev PLAN "$n file(s): $(printf '%s' "$conflicts" | tr '\n' ' ' | cut -c1-120)"
     PLANFILE="$ROOT/state/plan-$IID.md"
     set +e
-    mm_timeout "${RESOLVER_TIMEOUT:-900}" resolver_call plan "A merge of origin/$TGT into $SRC (${SIGIL}$IID${TITLE:+ — \"$TITLE\"}) has conflicts. You are in the worktree mid-merge with zdiff3 markers (||||||| shows the common ancestor). Do NOT edit anything — read the conflicted files and write a RESOLUTION PLAN as your answer.
+    mm_timeout "${RESOLVER_TIMEOUT:-900}" resolver_call plan "A merge of origin/$TGT into $SRC (${SIGIL}$IID${TITLE:+ — \"$TITLE\"}) has conflicts. You are in the worktree mid-merge with zdiff3 markers (||||||| shows the common ancestor). Do NOT edit anything — read the conflicted files and write a RESOLUTION PLAN as your answer.${tool_note:+ $tool_note}
 
 Conflicting files:
 $conflicts
@@ -713,7 +767,8 @@ Rules:
   '## How I would resolve it' (your best resolution, concrete, per file),
   '## Questions' (a numbered list of the specific decisions you need answered
   — the human will answer them and re-run you).
-- After editing: git add each resolved file. Do NOT commit, do NOT push.
+- After editing: git add each resolved file. Do NOT commit, do NOT push.${tool_note:+
+- $tool_note}
 - Write a summary into a file named $SUMFILE in the repo root, as
   GitHub-flavored markdown: a '### <file path>' heading per file with bullets
   '**source:** …', '**target:** …', '**kept:** …'. No preamble.$approved_ctx$policy" \

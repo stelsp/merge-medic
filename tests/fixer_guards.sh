@@ -261,6 +261,47 @@ check "our own resolution MR is skipped"        "/1" "$targets/$SK_EXCL"
 consider 7 feat-7 main "a feature" false conflict ccc ddd
 check "an ordinary conflicted MR is still picked" "7	feat-7	main	auto" "$(printf '%s' "$targets" | cut -f1-4)"
 
+# ── the claude resolver's permissions ───────────────────────────────────────
+echo
+echo "resolver permissions:"
+eval "$(sed -n '/^claude_args() {/,/^}/p' "$ROOT/fix-mr.sh")"
+# rules <mode> <allowed|denied>: the rules after --allowedTools or --disallowedTools
+rules() {
+  claude_args "$1" | awk -v want="--$2Tools" '/^--/ { on = ($0 == want); next } on'
+}
+for mode in plan resolve; do
+  args="$(claude_args "$mode")"
+  for flag in --restricted --strict-mcp-config; do
+    check "$mode: $flag" "1" "$(grep -cxF -- "$flag" <<<"$args")"
+  done
+  check "$mode: anything not allowed is denied, nobody asked" "dontAsk/none" \
+    "$(awk '/^--permission-mode$/ { getline; m = $0 } /^--permission-prompts$/ { getline; p = $0 } END { print m "/" p }' <<<"$args")"
+  check "$mode: no blanket git rule" "0" "$(rules "$mode" allowed | grep -cE '^Bash\(git( \*|:\*|\*)\)$')"
+  check "$mode: every Bash rule names its git command" "" \
+    "$(rules "$mode" allowed | grep '^Bash(' \
+       | grep -vE '^Bash\(git (status|log|show|add|rm|checkout --ours|checkout --theirs)( \*)?\)$' \
+       | grep -vE '^Bash\(git diff( --cached| HEAD| MERGE_HEAD)?( \*)?\)$')"
+  # two paths to `git diff`, one outside the repository, read any file
+  check "$mode: git diff takes no free arguments" "0" "$(rules "$mode" allowed | grep -cxF 'Bash(git diff *)')"
+  for deny in 'Bash(git push *)' 'Bash(git * push *)' 'Bash(git -c *)' 'Bash(git -C *)' 'Bash(*--output*)' \
+              'Bash(*>*)' 'Bash(*--no-index*)' 'Bash(*--pathspec-from-file*)'; do
+    check "$mode: $deny is denied" "1" "$(rules "$mode" disallowed | grep -cxF -- "$deny")"
+  done
+done
+check "plan: no tool that writes" "Read,Glob,Grep,Bash" "$(claude_args plan | awk '/^--tools$/ { getline; print }')"
+check "plan: git is read-only" "" "$(rules plan allowed | grep -E 'git (add|rm|checkout)')"
+check "resolve: may stage and pick sides" "4" "$(rules resolve allowed | grep -cE 'git (add|rm|checkout --ours|checkout --theirs) \*')"
+
+# the resolver's environment keeps git off the network, and only the resolver's
+eval "$(sed -n '/^resolver_call() {/,/^}/p' "$ROOT/fix-mr.sh")"
+# shellcheck disable=SC2329,SC2317  # called from the extracted resolver_call body
+evx() { :; }
+# shellcheck disable=SC2329,SC2317
+resolver_run() { printf '%s' "${GIT_ALLOW_PROTOCOL-unset}"; }
+check "the resolver runs with every git transport refused" "none" "$(resolver_call resolve x /dev/null)"
+resolver_call resolve x /dev/null >/dev/null
+check "…and the fixer itself does not"            "unset" "${GIT_ALLOW_PROTOCOL-unset}"
+
 rm -rf "$TMP"
 [ "$fails" = "0" ] && { echo "all good"; exit 0; }
 echo "$fails failing case(s)"; exit 1
