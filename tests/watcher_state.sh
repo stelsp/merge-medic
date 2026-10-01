@@ -163,5 +163,96 @@ git -C "$wt" commit -q -m "feat: an agent's own commit"
 if git -C "$wt" log -1 --format='%B' | grep -q '^Merge-Medic-Run: '; then ours=1; else ours=0; fi
 check "an agent's commit does not"        "0" "$ours"
 
+# ── watcher deadlines: a hung forge or git call ends the tick ───────────────
+# watch.sh itself, in an install of its own, with stand-ins for gh, glab and
+# git that answer at once, or hang on the call MM_HANG names
+echo
+echo "watcher deadlines:"
+WD="$(cd "$(mktemp -d)" && pwd -P)"
+MM="$WD/mm"
+mkdir -p "$MM" "$WD/bin" "$WD/watch/.git"
+cp "$ROOT/watch.sh" "$ROOT/lib.sh" "$MM/"
+MM_REAL_GIT="$(command -v git)"
+export MM_REAL_GIT MM_HANG MM_PRS MM_MRS
+cat > "$WD/bin/gh" <<'EOF'
+#!/bin/sh
+case "$1 $2" in
+  "pr list") [ "$MM_HANG" = gh-list ] && { sleep 59.4343; exit 1; }
+             printf '%s' "$MM_PRS" ;;
+  "api "*)   printf 'bbb\n' ;;
+  *)         exit 1 ;;
+esac
+EOF
+cat > "$WD/bin/glab" <<'EOF'
+#!/bin/sh
+case "$2" in
+  *state=opened*) [ "$MM_HANG" = glab-list ] && { sleep 59.4343; exit 1; }
+                  printf '%s' "$MM_MRS" ;;
+  *)              [ "$MM_HANG" = glab-detail ] && { sleep 59.4343; exit 1; }
+                  printf '{}' ;;
+esac
+EOF
+cat > "$WD/bin/git" <<'EOF'
+#!/bin/sh
+case " $* " in
+  *" fetch "*|*" clone "*) [ "$MM_HANG" = git-fetch ] && { sleep 59.4343; exit 1; } ;;
+esac
+exec "$MM_REAL_GIT" "$@"
+EOF
+chmod +x "$WD/bin/gh" "$WD/bin/glab" "$WD/bin/git"
+
+# watch_config <provider> [extra lines...] — config.env is sourced after
+# watch.sh sets its own PATH, so the stand-ins can still go first
+watch_config() {
+  local provider="$1"; shift
+  {
+    printf '%s\n' "export PATH=\"$WD/bin:\$PATH\"" "PROVIDER=\"$provider\"" \
+      'PROJECT_PATH="test/repo"' 'NOTIFY=0' 'NET_TIMEOUT=2' 'RADAR=0' \
+      'MAX_MRS_PER_RUN=3' "WATCH_REPO=\"$WD/watch\"" "GIT_REMOTE_URL=\"$WD/remote.git\""
+    [ "$#" -gt 0 ] && printf '%s\n' "$@"
+  } > "$MM/config.env"
+}
+# tick: one watcher run, itself bounded so a regression cannot stall the suite
+tick() {
+  rm -rf "$MM/state" "$MM/logs" "$MM/.lock"
+  SECONDS=0
+  mm_timeout 20 bash "$MM/watch.sh" >/dev/null 2>&1; RC=$?
+  FAST=$(( SECONDS < 12 ? 1 : 0 ))
+  LAST="$(tail -1 "$MM/logs/watch.log" 2>/dev/null)"
+  if pgrep -f '^sleep 59.4343' >/dev/null 2>&1; then LEFT=1; else LEFT=0; fi
+  pkill -f '^sleep 59.4343' 2>/dev/null
+  if [ -d "$MM/.lock" ]; then LOCKED=1; else LOCKED=0; fi
+}
+has() { case "$1" in *"$2"*) echo 1 ;; *) echo 0 ;; esac; }
+pr() { # number mergeable — one PR as gh pr list prints it
+  printf '{"number":%s,"title":"t","headRefName":"feat-%s","baseRefName":"main","mergeable":"%s","isDraft":false,"headRefOid":"aaa"}' "$1" "$1" "$2"
+}
+
+watch_config github; MM_HANG=gh-list; tick
+check "a hung PR listing ends the tick as a failed one does" "1" "$RC"
+check "…at its deadline"                       "1" "$FAST"
+check "…saying it timed out"                   "1" "$(has "$LAST" "ERROR could not list PRs — timed out after 2s")"
+check "…with nothing left running"             "0/0" "$LEFT/$LOCKED"
+
+watch_config gitlab; MM_HANG=glab-list; tick
+check "a hung MR listing ends the tick the same way" "1/1/1" "$RC/$FAST/$(has "$LAST" "ERROR could not list MRs — timed out after 2s")"
+check "…with nothing left running"             "0/0" "$LEFT/$LOCKED"
+
+MM_MRS='[{"iid":5,"sha":"aaa","source_branch":"feat-5","target_branch":"main","title":"t","draft":false,"detailed_merge_status":"conflict","has_conflicts":true}]'
+MM_HANG=glab-detail; tick
+check "a hung MR lookup does not end the tick" "0/1/0" "$RC/$FAST/$LEFT"
+check "…the MR reads unknown, as after a failed lookup" "unknown" "$(cut -d' ' -f1 "$MM/state/mr-5" 2>/dev/null)"
+
+watch_config github 'RADAR=1'; MM_PRS="[$(pr 7 MERGEABLE),$(pr 8 MERGEABLE)]"; MM_HANG=git-fetch; tick
+check "a hung radar fetch does not end the tick" "0/1/0" "$RC/$FAST/$LEFT"
+check "…which still reports"                   "1" "$(has "$LAST" "TICK 2 open")"
+
+watch_config github 'DRY_RUN=0'; MM_PRS="[$(pr 7 CONFLICTING)]"; MM_HANG=git-fetch; tick
+check "a hung fetch before launching ends the tick" "1/1/0" "$RC/$FAST/$LEFT"
+check "…saying it timed out"                   "1" "$(has "$LAST" "ERROR git fetch timed out after 2s")"
+if [ -e "$MM/logs/fixer-7.log" ]; then fx=1; else fx=0; fi
+check "…and launches no fixer"                 "0" "$fx"
+rm -rf "$WD"
+
 [ "$fails" = "0" ] && { echo "all good"; exit 0; }
 echo "$fails failing case(s)"; exit 1
