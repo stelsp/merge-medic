@@ -177,6 +177,35 @@ check "a fixer with two subshells counts once" "1" "$(mm_fixer_count "$FAKE_ROOT
 mm_kill_tree "$fake" TERM; wait "$fake" 2>/dev/null
 check "no fixer, no count"                     "0" "$(mm_fixer_count "$FAKE_ROOT")"
 
+# a process that exits between pgrep and ps has no parent left to look up
+# shellcheck disable=SC2329,SC2317  # called from mm_fixer_count
+pgrep() { printf '101\n102\n'; }
+# shellcheck disable=SC2329,SC2317
+ps() { if [ "$4" = 101 ]; then echo '    1'; else return 1; fi; }
+check "a fork that exits mid-count is not one more fixer" "1" "$(mm_fixer_count "$FAKE_ROOT")"
+unset -f pgrep ps
+
+# a fixer killed outright (no traps run) while mm_timeout waits leaves the
+# watchdog behind, carrying the fixer's command line: once the command it
+# guards is done, it must not hold a fixer slot until the deadline
+bash -c "exec -a 'bash $FAKE_ROOT/fix-mr.sh 9 feat-9 main' bash -c '. \"$ROOT/lib.sh\"; mm_timeout 4713 sleep 2.4713'" 2>/dev/null &
+fake=$!
+# (anchored: the fake fixer's own command line mentions the sleep too)
+n=0
+while ! pgrep -f '^sleep 2.4713' >/dev/null 2>&1 && [ "$n" -lt 25 ]; do sleep 0.2; n=$((n + 1)); done
+sleep 0.3
+kill -KILL "$fake"; wait "$fake" 2>/dev/null
+raw="$(pgrep -f "$FAKE_ROOT/fix-mr.sh" | wc -l | tr -d ' ')"
+check "the killed fixer really leaves its watchdog behind" "1" "$(( raw > 0 ? 1 : 0 ))"
+n=0
+while pgrep -f '^sleep 2.4713' >/dev/null 2>&1 && [ "$n" -lt 50 ]; do sleep 0.2; n=$((n + 1)); done
+n=0
+while [ "$(mm_fixer_count "$FAKE_ROOT")" != 0 ] && [ "$n" -lt 15 ]; do sleep 0.2; n=$((n + 1)); done
+check "a killed fixer's watchdog frees the slot once its command is done" \
+                                               "0" "$(mm_fixer_count "$FAKE_ROOT")"
+for p in $(pgrep -f "$FAKE_ROOT/fix-mr.sh"); do mm_kill_tree "$p" KILL; done
+pkill -f '^sleep 2.4713' 2>/dev/null; pkill -f '^sleep 4713' 2>/dev/null
+
 # ── resolution MRs: one per MR, and never treated as work ───────────────────
 echo
 echo "resolution MRs:"

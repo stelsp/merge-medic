@@ -119,13 +119,21 @@ mm_timeout() {
   fired="$(mktemp "${TMPDIR:-/tmp}/mm-timeout.XXXXXX")" && rm -f "$fired"
   "$@" &
   pid=$!
-  # The watchdog fires only if its sleep ran out AND the command is still
-  # there: when the command finishes first, the sleep is killed, and the
-  # `&&` chain must stop right there instead of reporting a timeout.
+  # The watchdog fires only if the deadline ran out AND the command is still
+  # there. It sleeps in 1s steps and leaves as soon as the command is gone:
+  # it is a fork carrying the caller's command line, and when the caller is
+  # killed outright (KILL runs no traps) nobody stops it any more — one long
+  # sleep would then outlive the command by up to the whole deadline, and
+  # mm_fixer_count would see a running fixer all that time.
   # It must not hold the caller's stdout either: inside $( ) that would keep
   # the substitution waiting for the full deadline.
-  ( sleep "$secs" && kill -0 "$pid" 2>/dev/null && : > "$fired" && mm_stop_tree "$pid" ) \
-    >/dev/null 2>&1 &
+  ( n=0
+    while [ "$n" -lt "$secs" ]; do
+      sleep 1
+      kill -0 "$pid" 2>/dev/null || exit 0
+      n=$((n + 1))
+    done
+    : > "$fired" && mm_stop_tree "$pid" ) >/dev/null 2>&1 &
   wd=$!
   # (2>/dev/null: bash's own "Terminated" job notice, not the command's output)
   wait "$pid" 2>/dev/null || rc=$?
@@ -159,6 +167,8 @@ mm_fixer_count() {
   pids=" $(pgrep -f "$1/fix-mr.sh" 2>/dev/null | tr '\n' ' ')"
   for p in $pids; do
     pp="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+    # no parent: the process exited after pgrep listed it — not a fixer
+    [ -n "$pp" ] || continue
     case "$pids" in *" $pp "*) ;; *) n=$((n + 1)) ;; esac
   done
   printf '%s' "$n"
