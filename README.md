@@ -111,8 +111,10 @@ tool does this; here it costs zero tokens and zero API calls.
 | Defer while hot | a branch pushed less than `QUIET_MINUTES` ago (or with uncommitted work in `USER_REPOS`) is DEFERRED, not raced — retried every tick for free until it goes quiet |
 | Excluded branches | branches you are actively pushing to are ignored |
 | Dedicated clone | fixers work in their own clone + per-MR worktrees, never in your checkout |
-| Deadlines | in the fixer, every AI call, gate and network step has a timeout, and a step past it is stopped with everything it started; a fixer that dies any other way is still recorded as FAIL, notified and cleaned up |
-| Scoped AI | resolver runs headless with a minimal tool allowlist, and its result is checked before anything is committed: a change outside the conflicted files, a commit or merge abort of its own, or a leftover conflict marker fails the run |
+| Deadlines | every AI call, gate, git step and network call (the watcher's included) has a timeout, and a step past it is stopped with everything it started; a fixer that dies any other way is still recorded as FAIL, notified and cleaned up |
+| Scoped AI | the claude resolver loads none of your Claude Code settings, hooks, plugins or MCP servers, its file tools stay inside its worktree, and its shell runs only the git commands a resolution needs (status, log, show, diff against the index or a revision; add, rm, checkout --ours/--theirs) — everything else is denied without asking. git's transports are switched off inside every resolver (aider and custom commands can switch them back on: only the claude resolver is fenced in). The result is checked before anything is committed: a change outside the conflicted files, a commit or merge abort of its own, or a leftover conflict marker fails the run |
+| Quarantine | git config, local refs (and hooks, when the bot runs them) are compared around every AI call, and a push by remote name from inside it shows in the reflogs: any of that fails the run and stops all fixing (`state/quarantined`) until a human has looked |
+| No hooks, no signing | the bot's own checkout, merge, commit and push run no git hooks and sign nothing unless `RUN_GIT_HOOKS` / `SIGN_BOT_COMMITS` say so — nothing waits on a prompt nobody will answer |
 | DRY_RUN | default mode: detect and log only |
 
 Desktop notifications (macOS `osascript` / Linux `notify-send` / Windows
@@ -254,7 +256,9 @@ Everything lives in `config.env` (gitignored; seeded from
 | `EXCLUDE_BRANCHES` | branches to ignore (your active work) |
 | `DAILY_AGENT_RUNS` | daily cap on AI invocations; `0` = unlimited (runs still counted) |
 | `PARALLEL_FIXERS` | concurrent fixers (`1` = sequential) |
-| `RESOLVER_TIMEOUT` / `GATE_TIMEOUT` / `NET_TIMEOUT` | fixer deadlines in seconds for one AI call (900), each gate (1800) and each git/forge network call (300); past it the step and everything it started are stopped (TERM, then KILL). A timed-out fetch, push, AI call or gate fails the run; a timed-out MR lookup or comment is logged and the run goes on. `0` = none; a value that is not a whole number falls back to the default |
+| `RESOLVER_TIMEOUT` / `GATE_TIMEOUT` / `NET_TIMEOUT` / `GIT_TIMEOUT` | deadlines in seconds for one AI call (900), each gate (1800), each git/forge network call (300, the watcher's too) and each local git step — checkout, merge, commit (300); past it the step and everything it started are stopped (TERM, then KILL). A timed-out fetch, push, AI call, gate or git step fails the run; a timed-out MR lookup or comment is logged and the run goes on. `0` = none; a value that is not a whole number falls back to the default |
+| `CLAUDE_MODEL` / `CLAUDE_EFFORT` / `CLAUDE_SETTINGS` | model, effort and (for auth that is not the keychain login) a `--settings` file of the claude resolver — your own Claude Code settings do not reach it |
+| `RUN_GIT_HOOKS` / `SIGN_BOT_COMMITS` | `0` (default) = the bot's git steps run no hooks and sign nothing; `1` turns each on |
 | `NOTIFY` / `NOTIFY_SOUND` | desktop notifications |
 
 ## Architecture
