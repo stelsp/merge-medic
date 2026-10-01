@@ -17,6 +17,10 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/us
 source "$ROOT/config.env"
 # shellcheck source=lib.sh
 source "$ROOT/lib.sh"
+# Every forge and git network call below runs under this deadline. A hung one
+# would hold $ROOT/.lock, and every later tick would leave silently, the
+# previous one being "still running".
+NET_TIMEOUT="$(mm_secs "${NET_TIMEOUT:-}" 300)"
 
 LOGDIR="$ROOT/logs"; mkdir -p "$LOGDIR"
 LOG="$LOGDIR/watch.log"
@@ -104,6 +108,21 @@ notify_once() { # kind key title body
   notify "$3" "$4"
 }
 
+# clone_watch_repo makes the dedicated clone. NET_TIMEOUT bounds it like any
+# network call; a first clone of a large repository may need it raised, and
+# the ERROR line says so rather than the tick ending without a word.
+clone_watch_repo() {
+  local crc=0
+  mm_timeout "$NET_TIMEOUT" git clone --quiet "$GIT_REMOTE_URL" "$WATCH_REPO" >>"$LOG" 2>&1 || crc=$?
+  [ "$crc" = 0 ] && return 0
+  if [ "$crc" = 124 ]; then
+    logc ERROR "" "git clone timed out after ${NET_TIMEOUT}s — raise NET_TIMEOUT if the first clone needs longer"
+  else
+    logc ERROR "" "git clone of $GIT_REMOTE_URL failed — see the lines above"
+  fi
+  return 1
+}
+
 # skip_once logs why an MR was passed over — but only when the reason (or its
 # key, e.g. the sha pair) changed since last tick. Repeating it every tick
 # would bury real events in the dashboard's fixed-size log tail.
@@ -175,6 +194,13 @@ consider() {
     SK_DRAFT=$((SK_DRAFT + 1)); skip_once "$iid" "draft" "draft · SKIP_DRAFTS=1"; return 0
   fi
 
+  # merge-medic's own resolution MRs are answers waiting for a human, never
+  # work: resolving one would stack a resolution on a resolution
+  case "$src" in
+    merge-medic/*)
+      SK_EXCL=$((SK_EXCL + 1)); skip_once "$iid" "own" "excluded · merge-medic's own resolution MR"; return 0 ;;
+  esac
+
   local ex
   # shellcheck disable=SC2153  # EXCLUDE_BRANCHES comes from config.env
   for ex in ${EXCLUDE_BRANCHES:-}; do
@@ -186,12 +212,7 @@ consider() {
   # allowlist: when INCLUDE_BRANCHES is set, only matching source branches
   # are handled at all (globs, space-separated); empty = every branch
   if [ -n "${INCLUDE_BRANCHES:-}" ]; then
-    local inc ok=0
-    for inc in $INCLUDE_BRANCHES; do
-      # shellcheck disable=SC2254
-      case "$src" in $inc) ok=1;; esac
-    done
-    if [ "$ok" != "1" ]; then
+    if ! mm_glob_match "$src" "$INCLUDE_BRANCHES" >/dev/null; then
       SK_INCL=$((SK_INCL + 1)); skip_once "$iid" "incl" "filtered · '$src' matches no INCLUDE_BRANCHES glob"; return 0
     fi
   fi
@@ -201,8 +222,9 @@ consider() {
   local mode="plan"
   mm_src_is_auto "$src" && mode="auto"
   # an approve marker upgrades ANY mode to fix-approved — it also unblocks
-  # escalated auto-branch MRs after the human answered the bot's questions
-  if [ -f "$STATE/approve-$iid" ]; then
+  # escalated auto-branch MRs after the human answered the bot's questions.
+  # A quarantined instance launches nothing, so the approval waits for it.
+  if [ -f "$STATE/approve-$iid" ] && [ ! -f "$STATE/quarantined" ]; then
     mode="fix-approved"
     rm -f "$STATE/approve-$iid"
     logc FIX "$iid" "approval consumed · mode=fix-approved"; verbose=1
@@ -229,10 +251,15 @@ if mm_is_github; then
   # --limit is a total cap, not a page size: gh paginates up to it. 500 keeps
   # the whole list in one variable while covering any realistic repo — and
   # sweep_closed refuses to run if we ever hit the cap (see LIST_COMPLETE).
-  prs="$(gh pr list --repo "$PROJECT_PATH" --state open --limit "$LIST_CAP" \
-        --json number,title,headRefName,baseRefName,mergeable,isDraft,headRefOid,statusCheckRollup,author,updatedAt 2>/dev/null || echo '')"
-  if [ -z "$prs" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$prs"; then
-    logc ERROR "" "could not list PRs — check: gh auth status"
+  lrc=0
+  prs="$(mm_timeout "$NET_TIMEOUT" gh pr list --repo "$PROJECT_PATH" --state open --limit "$LIST_CAP" \
+        --json number,title,headRefName,baseRefName,mergeable,isDraft,headRefOid,statusCheckRollup,author,updatedAt 2>/dev/null)" || lrc=$?
+  if [ "$lrc" = 124 ] || [ -z "$prs" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$prs"; then
+    if [ "$lrc" = 124 ]; then
+      logc ERROR "" "could not list PRs — timed out after ${NET_TIMEOUT}s"
+    else
+      logc ERROR "" "could not list PRs — check: gh auth status"
+    fi
     notify_once forge "prs" "merge-medic: cannot list PRs" "check gh auth status"
     exit 1
   fi
@@ -243,7 +270,7 @@ if mm_is_github; then
     # GitHub computes mergeability asynchronously — give it a moment
     if [ "$mergeable" = "UNKNOWN" ]; then
       sleep 5
-      mergeable="$(gh pr view "$iid" --repo "$PROJECT_PATH" --json mergeable --jq .mergeable 2>/dev/null || echo UNKNOWN)"
+      mergeable="$(mm_timeout "$NET_TIMEOUT" gh pr view "$iid" --repo "$PROJECT_PATH" --json mergeable --jq .mergeable 2>/dev/null || echo UNKNOWN)"
     fi
     case "$mergeable" in
       CONFLICTING) status="conflict" ;;
@@ -265,7 +292,7 @@ if mm_is_github; then
     old_ssha="$(cut -d' ' -f2 "$STATE/mr-$iid" 2>/dev/null | cut -d: -f1 || true)"
     old_tsha="$(cut -d' ' -f2 "$STATE/mr-$iid" 2>/dev/null | cut -d: -f2 || true)"
     if [ "$ssha" != "$old_ssha" ] || [ -z "$old_tsha" ] || [ "$old_tsha" = "?" ]; then
-      tsha="$(gh api "repos/$PROJECT_PATH/compare/$tgt...$ssha" \
+      tsha="$(mm_timeout "$NET_TIMEOUT" gh api "repos/$PROJECT_PATH/compare/$tgt...$ssha" \
                 --jq '.merge_base_commit.sha' 2>/dev/null || echo '?')"
     else
       tsha="$old_tsha"   # unchanged head: the merge base cannot have moved
@@ -283,10 +310,15 @@ else
   # unpaginated listing would make sweep_closed treat page 2 as closed
   mrs="[]"; page=1
   while :; do
-    chunk="$(glab api "projects/$ENC_PATH/merge_requests?state=opened&per_page=100&page=$page" 2>/dev/null || echo '')"
-    if [ -z "$chunk" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$chunk"; then
+    lrc=0
+    chunk="$(mm_timeout "$NET_TIMEOUT" glab api "projects/$ENC_PATH/merge_requests?state=opened&per_page=100&page=$page" 2>/dev/null)" || lrc=$?
+    if [ "$lrc" = 124 ] || [ -z "$chunk" ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$chunk"; then
       if [ "$page" = "1" ]; then
-        logc ERROR "" "could not list MRs — check: glab auth status / GITLAB_TOKEN"
+        if [ "$lrc" = 124 ]; then
+          logc ERROR "" "could not list MRs — timed out after ${NET_TIMEOUT}s"
+        else
+          logc ERROR "" "could not list MRs — check: glab auth status / GITLAB_TOKEN"
+        fi
         notify_once forge "mrs" "merge-medic: cannot list MRs" "check glab auth status"
         exit 1
       fi
@@ -325,11 +357,11 @@ else
     old_ci="$(cut -d' ' -f5 "$STATE/mr-$iid" 2>/dev/null || true)"
     old_tsha="$(cut -d' ' -f2 "$STATE/mr-$iid" 2>/dev/null | cut -d: -f2 || true)"
     if [ "$ssha" != "$old_ssha" ] || [ "$status" = "unknown" ] || [ -z "$old_tsha" ]; then
-      mr="$(glab api "projects/$ENC_PATH/merge_requests/$iid" 2>/dev/null || echo '{}')"
+      mr="$(mm_timeout "$NET_TIMEOUT" glab api "projects/$ENC_PATH/merge_requests/$iid" 2>/dev/null || echo '{}')"
       raw="$(jq -r '.detailed_merge_status // "unknown"' <<<"$mr")"
       if [ "$raw" = "checking" ] || [ "$raw" = "unchecked" ]; then
         sleep 5   # GitLab is still computing mergeability — ask once more
-        mr="$(glab api "projects/$ENC_PATH/merge_requests/$iid" 2>/dev/null || echo '{}')"
+        mr="$(mm_timeout "$NET_TIMEOUT" glab api "projects/$ENC_PATH/merge_requests/$iid" 2>/dev/null || echo '{}')"
         raw="$(jq -r '.detailed_merge_status // "unknown"' <<<"$mr")"
       fi
       status="$(gl_status "$raw" "$(jq -r '.has_conflicts // false' <<<"$mr")")"
@@ -415,9 +447,9 @@ radar_scan() {
     mv "$out" "$STATE/radar"; return 0
   fi
   if [ ! -d "$WATCH_REPO/.git" ]; then
-    git clone --quiet "$GIT_REMOTE_URL" "$WATCH_REPO" >>"$LOG" 2>&1 || { rm -f "$out"; return 0; }
+    clone_watch_repo || { rm -f "$out"; return 0; }
   fi
-  git -C "$WATCH_REPO" fetch --prune --quiet origin >>"$LOG" 2>&1 || { rm -f "$out"; return 0; }
+  mm_timeout "$NET_TIMEOUT" git -C "$WATCH_REPO" fetch --prune --quiet origin >>"$LOG" 2>&1 || { rm -f "$out"; return 0; }
   local pairs=0 a_iid a_src a_tgt b_iid b_src b_tgt
   while IFS=' ' read -r a_iid a_src a_tgt; do
     [ -z "$a_iid" ] && continue
@@ -506,39 +538,66 @@ if [ "${DRY_RUN:-1}" = "1" ]; then
   exit 0
 fi
 
+# A fixer whose AI call changed git's own state quarantined the instance
+# (fix-mr.sh, guard_check): nothing is launched until a human has looked and
+# removed the file. The pairs stay unmarked, so the tick after that picks
+# them up as usual.
+if [ -f "$STATE/quarantined" ]; then
+  qkey="$(cksum < "$STATE/quarantined")"
+  if [ "$(cat "$STATE/notified-quarantine" 2>/dev/null || true)" != "$qkey" ]; then
+    logc ERROR "" "quarantined, fixing stopped: $(head -1 "$STATE/quarantined" | mm_clean) — check $WATCH_REPO, then remove state/quarantined"
+  fi
+  notify_once quarantine "$qkey" "merge-medic: fixing stopped" "an AI call changed git's own state — see state/quarantined"
+  exit 0
+fi
+
 # ── dedicated clone (created lazily, only when there is real work) ────────────
 if [ ! -d "$WATCH_REPO/.git" ]; then
   logc FIX "" "cloning $GIT_REMOTE_URL -> $WATCH_REPO (first run)"
-  git clone --quiet "$GIT_REMOTE_URL" "$WATCH_REPO" >>"$LOG" 2>&1
+  clone_watch_repo || exit 1
 fi
-git -C "$WATCH_REPO" fetch --prune --quiet origin >>"$LOG" 2>&1 || {
-  logc ERROR "" "git fetch failed — see the lines above"
+mm_timeout "$NET_TIMEOUT" git -C "$WATCH_REPO" fetch --prune --quiet origin >>"$LOG" 2>&1 || {
+  frc=$?
+  if [ "$frc" = 124 ]; then
+    logc ERROR "" "git fetch timed out after ${NET_TIMEOUT}s"
+  else
+    logc ERROR "" "git fetch failed — see the lines above"
+  fi
   notify_once forge "fetch" "merge-medic: git fetch failed" "the watcher cannot reach the remote"
   exit 1; }
-
-# ── mark pairs as tried BEFORE launching (no retry loops on crashes) ──────────
-while IFS=$'\t' read -r iid _ _ _; do
-  [ -z "$iid" ] && continue
-  mark_tried "$iid"
-done <<<"$targets"
 
 # ── launch fixers (fix-mr.sh, one per MR; cap PARALLEL_FIXERS) ────────────────
 # Each fixer decides on its own whether AI is needed (only on real conflict
 # markers), accounts the AI budget, and writes phases to
 # state/progress-<iid>.log for `mrwatch top`.
-running_fixers() { pgrep -f "$ROOT/fix-mr.sh" 2>/dev/null | wc -l | tr -d ' '; }
+running_fixers() { mm_fixer_count "$ROOT"; }
+
+# launch_fixers marks each pair tried right before its own fixer starts (no
+# retry loops on crashes), never earlier: a tick killed while it waits for a
+# slot must leave the MRs it never reached unmarked, or no fixer ever runs for
+# them — a marked pair stays deduped until somebody pushes.
+launch_fixers() {
+  local iid src tgt mode title launched=0
+  while IFS=$'\t' read -r iid src tgt mode title; do
+    [ -z "$iid" ] && continue
+    if [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; then
+      logc FIX "$iid" "waiting for a slot · $(running_fixers)/${PARALLEL_FIXERS:-1} fixers busy"
+      while [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; do sleep 5; done
+    fi
+    # a fixer launched earlier in this tick may have quarantined the
+    # instance while this one waited: leave it and the rest unmarked
+    if [ -f "$STATE/quarantined" ]; then
+      logc ERROR "$iid" "quarantined while waiting for a slot — not launching the rest"
+      break
+    fi
+    mark_tried "$iid"
+    nohup bash "$ROOT/fix-mr.sh" "$iid" "$src" "$tgt" "$title" "$mode" >> "$LOGDIR/fixer-$iid.log" 2>&1 &
+    logc FIX "$iid" "fixer started · $src -> $tgt [$mode] pid=$! log: fixer-$iid.log"
+    launched=$((launched + 1))
+    sleep 1
+  done <<<"$targets"
+  logc FIX "" "$launched fixer(s) launched (cap ${PARALLEL_FIXERS:-1}) — results arrive as notifications"
+}
 
 notify "Conflicts: $count MR(s)" "Launching fixers (mrwatch top for progress)"
-launched=0
-while IFS=$'\t' read -r iid src tgt mode title; do
-  [ -z "$iid" ] && continue
-  if [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; then
-    logc FIX "$iid" "waiting for a slot · $(running_fixers)/${PARALLEL_FIXERS:-1} fixers busy"
-    while [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; do sleep 5; done
-  fi
-  nohup bash "$ROOT/fix-mr.sh" "$iid" "$src" "$tgt" "$title" "$mode" >> "$LOGDIR/fixer-$iid.log" 2>&1 &
-  logc FIX "$iid" "fixer started · $src -> $tgt [$mode] pid=$! log: fixer-$iid.log"
-  launched=$((launched + 1))
-  sleep 1
-done <<<"$targets"
-logc FIX "" "$launched fixer(s) launched (cap ${PARALLEL_FIXERS:-1}) — results arrive as notifications"
+launch_fixers

@@ -111,7 +111,10 @@ tool does this; here it costs zero tokens and zero API calls.
 | Defer while hot | a branch pushed less than `QUIET_MINUTES` ago (or with uncommitted work in `USER_REPOS`) is DEFERRED, not raced — retried every tick for free until it goes quiet |
 | Excluded branches | branches you are actively pushing to are ignored |
 | Dedicated clone | fixers work in their own clone + per-MR worktrees, never in your checkout |
-| Scoped AI | resolver runs headless with a minimal tool allowlist; it cannot commit or push |
+| Deadlines | every AI call, gate, git step and network call (the watcher's included) has a timeout, and a step past it is stopped with everything it started; a fixer that dies any other way is still recorded as FAIL, notified and cleaned up |
+| Scoped AI | the claude resolver loads none of your Claude Code settings, hooks, plugins or MCP servers, its file tools stay inside its worktree, and its shell runs only the git commands a resolution needs (status, log, show, diff against the index or a revision; add, rm, checkout --ours/--theirs) — everything else is denied without asking. git's transports are switched off inside every resolver (aider and custom commands can switch them back on: only the claude resolver is fenced in). The result is checked before anything is committed: a change outside the conflicted files, a commit or merge abort of its own, or a leftover conflict marker fails the run |
+| Quarantine | git config, local refs (and hooks, when the bot runs them) are compared around every AI call, and a push by remote name from inside it shows in the reflogs: any of that fails the run and stops all fixing (`state/quarantined`) until a human has looked |
+| No hooks, no signing | the bot's own checkout, merge, commit and push run no git hooks and sign nothing unless `RUN_GIT_HOOKS` / `SIGN_BOT_COMMITS` say so — nothing waits on a prompt nobody will answer |
 | DRY_RUN | default mode: detect and log only |
 
 Desktop notifications (macOS `osascript` / Linux `notify-send` / Windows
@@ -240,11 +243,11 @@ Everything lives in `config.env` (gitignored; seeded from
 | `REGRESSION_CMD` / `REGRESSION_WHEN` | full suite gate: `ai` (default) / `always` / `never` |
 | `RESOLVER` | `claude` (default) / `aider` (any model via API keys: `RESOLVER_MODEL`) / `custom` (`RESOLVER_CMD`) |
 | `RULES_KEEP_OURS` | ERE for lines that carry no decision (a `> verified: <sha>` stamp every branch rewrites). A hunk differing only in such lines is resolved in your favour before the model is called — no tokens, no budget slot. Anything else in the hunk sends it to the resolver untouched. |
-| `PUSH_MODE` | `mr` (default: your branch is never touched — the resolution is opened as its own MR/PR into it, you review and merge) / `direct` (the merge commit is pushed into the source branch) |
+| `PUSH_MODE` | `mr` (default: your branch is never touched — the resolution is opened as its own MR/PR into it, you review and merge; while one is open, new pushes wait for it instead of opening another — an approved run, or a lookup the forge does not answer, can still open a second) / `direct` (the merge commit is pushed into the source branch) |
 | `TRUSTED_AUTHORS` | usernames whose plan comments the approved run obeys (default: the MR author only) |
 | `RESOLVE_POLICY_FILE` | project-specific resolution rules appended to the prompt |
 | `AUTO_BRANCHES` | source-branch globs fixed fully automatically (default `feat-*`); any other source gets the semi-auto flow: plan → MR comment → human approve (`a` in the dashboard) → fix that reads your comments |
-| `ESCALATE_PATTERNS` | glob paths the bot must never resolve |
+| `ESCALATE_PATTERNS` | glob paths the bot must never resolve; a glob covers subdirectories (`src/auth/*` protects everything under `src/auth/`) |
 | `POST_RESOLUTION_NOTE` | `1` = comment the resolver's reasoning on the MR/PR |
 | `QUIET_MINUTES` | defer the fix while the source branch had a push this recently (retried every tick; `0` disables) |
 | `USER_REPOS` | local checkouts to inspect — uncommitted work on the branch there also defers the fix |
@@ -253,6 +256,9 @@ Everything lives in `config.env` (gitignored; seeded from
 | `EXCLUDE_BRANCHES` | branches to ignore (your active work) |
 | `DAILY_AGENT_RUNS` | daily cap on AI invocations; `0` = unlimited (runs still counted) |
 | `PARALLEL_FIXERS` | concurrent fixers (`1` = sequential) |
+| `RESOLVER_TIMEOUT` / `GATE_TIMEOUT` / `NET_TIMEOUT` / `GIT_TIMEOUT` | deadlines in seconds for one AI call (900), each gate (1800), each git/forge network call (300, the watcher's too) and each local git step — checkout, merge, commit (300); past it the step and everything it started are stopped (TERM, then KILL). A timed-out fetch, push, AI call, gate or git step fails the run; a timed-out MR lookup or comment is logged and the run goes on. `0` = none; a value that is not a whole number falls back to the default |
+| `CLAUDE_MODEL` / `CLAUDE_EFFORT` / `CLAUDE_SETTINGS` | model, effort and (for auth that is not the keychain login) a `--settings` file of the claude resolver — your own Claude Code settings do not reach it |
+| `RUN_GIT_HOOKS` / `SIGN_BOT_COMMITS` | `0` (default) = the bot's git steps run no hooks and sign nothing; `1` turns each on |
 | `NOTIFY` / `NOTIFY_SOUND` | desktop notifications |
 
 ## Architecture

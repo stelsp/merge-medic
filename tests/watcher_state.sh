@@ -163,5 +163,160 @@ git -C "$wt" commit -q -m "feat: an agent's own commit"
 if git -C "$wt" log -1 --format='%B' | grep -q '^Merge-Medic-Run: '; then ours=1; else ours=0; fi
 check "an agent's commit does not"        "0" "$ours"
 
+# ── launch queue: a tick killed while it waits for a slot keeps its queue ───
+eval "$(sed -n '/^mark_tried() /p' "$ROOT/watch.sh")"
+eval "$(sed -n '/^launch_fixers() {/,/^}/p' "$ROOT/watch.sh")"
+
+echo
+echo "launch queue:"
+new_state; MARK=tried; PARALLEL_FIXERS=1
+LQ="$(cd "$(mktemp -d)" && pwd -P)"
+# the stand-in fixer notes whether its pair was marked by the time it started
+# shellcheck disable=SC2016  # the fake fixer expands $1 itself, at run time
+printf 'if [ -e "%s/tried-$1" ]; then echo marked; else echo unmarked; fi > "%s/started-$1"\n' \
+  "$STATE" "$LQ" > "$LQ/fix-mr.sh"
+# one free slot for the first launch, busy for good after that
+# shellcheck disable=SC2329,SC2317  # called from the extracted launch_fixers body
+running_fixers() { if [ -e "$LQ/slot-taken" ]; then echo 1; else : > "$LQ/slot-taken"; echo 0; fi; }
+# shellcheck disable=SC2329,SC2317
+logc() { printf '%s\n' "$*" >> "$LQ/log"; }
+echo "conflict aaa:bbb feat-1 main none u x - one" > "$STATE/mr-1"
+echo "conflict ccc:ddd feat-2 main none u x - two" > "$STATE/mr-2"
+targets="$(printf '1\tfeat-1\tmain\tauto\tone\n2\tfeat-2\tmain\tauto\ttwo')"
+ROOT="$LQ" LOGDIR="$LQ" launch_fixers &
+launcher=$!
+n=0
+while ! grep -q 'waiting for a slot' "$LQ/log" 2>/dev/null && [ "$n" -lt 50 ]; do sleep 0.2; n=$((n + 1)); done
+mm_kill_tree "$launcher" TERM; wait "$launcher" 2>/dev/null
+check "the launched MR is marked tried"       "aaa:bbb" "$(cat "$STATE/tried-1" 2>/dev/null)"
+check "…before its fixer started"             "marked" "$(cat "$LQ/started-1" 2>/dev/null)"
+check "an MR still waiting for a slot is not" "0" "$(count_state 'tried-2')"
+rm -rf "$LQ"
+
+# a fixer of this tick that quarantines the instance stops the launches
+# behind it, which stay unmarked for after a human has looked
+new_state
+LQ="$(cd "$(mktemp -d)" && pwd -P)"
+# shellcheck disable=SC2016  # the fake fixer expands $1 itself, at run time
+printf ': > "%s/started-$1"; : > "%s/quarantined"\n' "$LQ" "$STATE" > "$LQ/fix-mr.sh"
+# shellcheck disable=SC2329,SC2317  # called from the extracted launch_fixers body
+running_fixers() { echo 0; }
+echo "conflict aaa:bbb feat-1 main none u x - one" > "$STATE/mr-1"
+echo "conflict ccc:ddd feat-2 main none u x - two" > "$STATE/mr-2"
+ROOT="$LQ" LOGDIR="$LQ" launch_fixers
+if [ -e "$LQ/started-2" ]; then st=1; else st=0; fi
+check "a quarantine during the tick stops the launches behind it" "0/0" "$st/$(count_state 'tried-2')"
+check "…and says so" "1" "$(grep -c 'quarantined while waiting for a slot' "$LQ/log")"
+rm -rf "$LQ"
+
+# ── watcher deadlines: a hung forge or git call ends the tick ───────────────
+# watch.sh itself, in an install of its own, with stand-ins for gh, glab and
+# git that answer at once, or hang on the call MM_HANG names
+echo
+echo "watcher deadlines:"
+WD="$(cd "$(mktemp -d)" && pwd -P)"
+MM="$WD/mm"
+mkdir -p "$MM" "$WD/bin" "$WD/watch/.git"
+cp "$ROOT/watch.sh" "$ROOT/lib.sh" "$MM/"
+MM_REAL_GIT="$(command -v git)"
+export MM_REAL_GIT MM_HANG MM_PRS MM_MRS
+cat > "$WD/bin/gh" <<'EOF'
+#!/bin/sh
+case "$1 $2" in
+  "pr list") [ "$MM_HANG" = gh-list ] && { sleep 59.4343; exit 1; }
+             printf '%s' "$MM_PRS" ;;
+  "api "*)   printf 'bbb\n' ;;
+  *)         exit 1 ;;
+esac
+EOF
+cat > "$WD/bin/glab" <<'EOF'
+#!/bin/sh
+case "$2" in
+  *state=opened*) [ "$MM_HANG" = glab-list ] && { sleep 59.4343; exit 1; }
+                  printf '%s' "$MM_MRS" ;;
+  *)              [ "$MM_HANG" = glab-detail ] && { sleep 59.4343; exit 1; }
+                  printf '{}' ;;
+esac
+EOF
+cat > "$WD/bin/git" <<'EOF'
+#!/bin/sh
+case " $* " in
+  *" fetch "*|*" clone "*) [ "$MM_HANG" = git-fetch ] && { sleep 59.4343; exit 1; } ;;
+esac
+exec "$MM_REAL_GIT" "$@"
+EOF
+chmod +x "$WD/bin/gh" "$WD/bin/glab" "$WD/bin/git"
+
+# watch_config <provider> [extra lines...] — config.env is sourced after
+# watch.sh sets its own PATH, so the stand-ins can still go first
+watch_config() {
+  local provider="$1"; shift
+  {
+    printf '%s\n' "export PATH=\"$WD/bin:\$PATH\"" "PROVIDER=\"$provider\"" \
+      'PROJECT_PATH="test/repo"' 'NOTIFY=0' 'NET_TIMEOUT=2' 'RADAR=0' \
+      'MAX_MRS_PER_RUN=3' "WATCH_REPO=\"$WD/watch\"" "GIT_REMOTE_URL=\"$WD/remote.git\""
+    [ "$#" -gt 0 ] && printf '%s\n' "$@"
+  } > "$MM/config.env"
+}
+# tick: one watcher run, itself bounded so a regression cannot stall the suite
+tick() {
+  rm -rf "$MM/state" "$MM/logs" "$MM/.lock"
+  SECONDS=0
+  mm_timeout 20 bash "$MM/watch.sh" >/dev/null 2>&1; RC=$?
+  FAST=$(( SECONDS < 12 ? 1 : 0 ))
+  LAST="$(tail -1 "$MM/logs/watch.log" 2>/dev/null)"
+  if pgrep -f '^sleep 59.4343' >/dev/null 2>&1; then LEFT=1; else LEFT=0; fi
+  pkill -f '^sleep 59.4343' 2>/dev/null
+  if [ -d "$MM/.lock" ]; then LOCKED=1; else LOCKED=0; fi
+}
+has() { case "$1" in *"$2"*) echo 1 ;; *) echo 0 ;; esac; }
+pr() { # number mergeable — one PR as gh pr list prints it
+  printf '{"number":%s,"title":"t","headRefName":"feat-%s","baseRefName":"main","mergeable":"%s","isDraft":false,"headRefOid":"aaa"}' "$1" "$1" "$2"
+}
+
+watch_config github; MM_HANG=gh-list; tick
+check "a hung PR listing ends the tick as a failed one does" "1" "$RC"
+check "…at its deadline"                       "1" "$FAST"
+check "…saying it timed out"                   "1" "$(has "$LAST" "ERROR could not list PRs — timed out after 2s")"
+check "…with nothing left running"             "0/0" "$LEFT/$LOCKED"
+
+watch_config gitlab; MM_HANG=glab-list; tick
+check "a hung MR listing ends the tick the same way" "1/1/1" "$RC/$FAST/$(has "$LAST" "ERROR could not list MRs — timed out after 2s")"
+check "…with nothing left running"             "0/0" "$LEFT/$LOCKED"
+
+MM_MRS='[{"iid":5,"sha":"aaa","source_branch":"feat-5","target_branch":"main","title":"t","draft":false,"detailed_merge_status":"conflict","has_conflicts":true}]'
+MM_HANG=glab-detail; tick
+check "a hung MR lookup does not end the tick" "0/1/0" "$RC/$FAST/$LEFT"
+check "…the MR reads unknown, as after a failed lookup" "unknown" "$(cut -d' ' -f1 "$MM/state/mr-5" 2>/dev/null)"
+
+watch_config github 'RADAR=1'; MM_PRS="[$(pr 7 MERGEABLE),$(pr 8 MERGEABLE)]"; MM_HANG=git-fetch; tick
+check "a hung radar fetch does not end the tick" "0/1/0" "$RC/$FAST/$LEFT"
+check "…which still reports"                   "1" "$(has "$LAST" "TICK 2 open")"
+
+watch_config github 'DRY_RUN=0'; MM_PRS="[$(pr 7 CONFLICTING)]"; MM_HANG=git-fetch; tick
+check "a hung fetch before launching ends the tick" "1/1/0" "$RC/$FAST/$LEFT"
+check "…saying it timed out"                   "1" "$(has "$LAST" "ERROR git fetch timed out after 2s")"
+if [ -e "$MM/logs/fixer-7.log" ]; then fx=1; else fx=0; fi
+check "…and launches no fixer"                 "0" "$fx"
+
+# a quarantined instance launches nothing, says so once, and keeps the
+# conflict unmarked for the tick after a human has cleared it
+echo
+echo "quarantine:"
+watch_config github 'DRY_RUN=0'; MM_PRS="[$(pr 7 CONFLICTING)]"; MM_HANG=none
+rm -rf "$MM/state" "$MM/logs" "$MM/.lock"; mkdir -p "$MM/state"
+printf '2026-10-01 12:00 #7: the resolver changed alias.x\n' > "$MM/state/quarantined"
+: > "$MM/state/approve-7"
+mm_timeout 20 bash "$MM/watch.sh" >/dev/null 2>&1; RC=$?
+mm_timeout 20 bash "$MM/watch.sh" >/dev/null 2>&1
+if [ -e "$MM/logs/fixer-7.log" ]; then fx=1; else fx=0; fi
+check "a quarantined instance launches no fixer" "0/0" "$RC/$fx"
+check "…says why, once"                        "1" "$(grep -c 'ERROR quarantined, fixing stopped' "$MM/logs/watch.log")"
+if [ -e "$MM/state/tried-7" ]; then tr=1; else tr=0; fi
+check "…and leaves the conflict to be fixed later" "0" "$tr"
+if [ -e "$MM/state/approve-7" ]; then ap=1; else ap=0; fi
+check "…with a pending approval kept for then" "1" "$ap"
+rm -rf "$WD"
+
 [ "$fails" = "0" ] && { echo "all good"; exit 0; }
 echo "$fails failing case(s)"; exit 1

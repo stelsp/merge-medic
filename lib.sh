@@ -45,15 +45,133 @@ mm_ref_sigil() {
   if mm_is_github; then printf '#'; else printf '!'; fi
 }
 
+# mm_glob_match <string> <globs> — print the first of the space-separated
+# globs that matches <string> and succeed; fail when none does.
+# Pathname expansion is off while the list is split. An unquoted
+# `for g in $globs` expands "src/auth/*" against whatever directory the
+# caller stands in, and the case test then compares the string with the
+# names found there instead of with the glob: "src/auth/sub/x.ts" silently
+# stops matching. In a case pattern `*` also matches "/", so a glob covers
+# the whole subtree.
+mm_glob_match() {
+  local s="$1" globs="$2" g hit="" was_noglob=0
+  case "$-" in *f*) was_noglob=1 ;; esac
+  set -f
+  for g in $globs; do
+    # shellcheck disable=SC2254  # unquoted on purpose: $g is the glob
+    case "$s" in $g) hit="$g"; break ;; esac
+  done
+  [ "$was_noglob" = 1 ] || set +f
+  [ -n "$hit" ] || return 1
+  printf '%s\n' "$hit"
+}
+
 # True when branch $1 matches any glob in AUTO_BRANCHES (default feat-*) —
 # such sources are fixed fully automatically, everything else needs approval.
 mm_src_is_auto() {
-  local src="$1" ab
-  for ab in ${AUTO_BRANCHES:-feat-*}; do
-    # shellcheck disable=SC2254  # unquoted on purpose: $ab is the glob
-    case "$src" in $ab) return 0;; esac
+  mm_glob_match "$1" "${AUTO_BRANCHES:-feat-*}" >/dev/null
+}
+
+# mm_tree_pids <pid> — the process and everything it started, children first.
+mm_tree_pids() {
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do mm_tree_pids "$c"; done
+  printf '%s\n' "$1"
+}
+
+# mm_kill_tree <pid> <signal> — signal a process and everything it started.
+# The tree is listed before the first signal: a child whose parent dies is
+# re-parented, and a walk that starts from the dead parent no longer finds it.
+mm_kill_tree() {
+  local p
+  for p in $(mm_tree_pids "$1"); do kill "-$2" "$p" 2>/dev/null || true; done
+}
+
+# mm_stop_tree <pid>... — stop processes and everything they started: TERM,
+# up to 5s to exit, then KILL for whatever is still there (a step that traps
+# TERM, a docker CLI waiting on its container). Returns once all are gone.
+mm_stop_tree() {
+  local root pids="" p n=0 alive
+  for root in "$@"; do pids="$pids $(mm_tree_pids "$root" | tr '\n' ' ')"; done
+  for p in $pids; do kill -TERM "$p" 2>/dev/null || true; done
+  while [ "$n" -lt 25 ]; do
+    alive=0
+    for p in $pids; do if kill -0 "$p" 2>/dev/null; then alive=1; break; fi; done
+    [ "$alive" = 0 ] && return 0
+    sleep 0.2; n=$((n + 1))
   done
-  return 1
+  for p in $pids; do kill -0 "$p" 2>/dev/null && mm_kill_tree "$p" KILL; done
+  return 0
+}
+
+# mm_timeout <seconds> <command...> — run the command (a function works too);
+# if it is still running after <seconds>, stop it and everything it started
+# (mm_stop_tree) before returning 124, GNU timeout's code. Otherwise returns
+# the command's own status. Empty or 0 seconds = no limit.
+# macOS ships no timeout(1), and timeout(1) could not run a shell function.
+# The command runs in the background, so its stdin is /dev/null — nothing a
+# fixer runs unattended should be waiting for input anyway.
+mm_timeout() {
+  local secs="$1" fired pid wd rc=0
+  shift
+  case "$secs" in ''|*[!0-9]*) secs=0 ;; esac
+  if [ "$secs" -eq 0 ]; then "$@"; return; fi
+  fired="$(mktemp "${TMPDIR:-/tmp}/mm-timeout.XXXXXX")" && rm -f "$fired"
+  "$@" &
+  pid=$!
+  # The watchdog fires only if the deadline ran out AND the command is still
+  # there. It sleeps in 1s steps and leaves as soon as the command is gone:
+  # it is a fork carrying the caller's command line, and when the caller is
+  # killed outright (KILL runs no traps) nobody stops it any more — one long
+  # sleep would then outlive the command by up to the whole deadline, and
+  # mm_fixer_count would see a running fixer all that time.
+  # It must not hold the caller's stdout either: inside $( ) that would keep
+  # the substitution waiting for the full deadline.
+  ( n=0
+    while [ "$n" -lt "$secs" ]; do
+      sleep 1
+      kill -0 "$pid" 2>/dev/null || exit 0
+      n=$((n + 1))
+    done
+    : > "$fired" && mm_stop_tree "$pid" ) >/dev/null 2>&1 &
+  wd=$!
+  # (2>/dev/null: bash's own "Terminated" job notice, not the command's output)
+  wait "$pid" 2>/dev/null || rc=$?
+  if [ -e "$fired" ]; then
+    # timed out: let the watchdog finish, so nothing the step started is
+    # still running (or still writing into its worktree) when we return
+    wait "$wd" 2>/dev/null || true
+    rm -f "$fired"
+    return 124
+  fi
+  mm_kill_tree "$wd" TERM
+  wait "$wd" 2>/dev/null || true
+  rm -f "$fired"
+  return "$rc"
+}
+
+# mm_secs <value> <default> — a deadline from hand-edited config: a whole
+# number of seconds, 0 for none. Anything else ("15m", "1.5", empty) falls
+# back to the default instead of silently meaning "no deadline".
+mm_secs() {
+  case "$1" in ''|*[!0-9]*) printf '%s' "$2" ;; *) printf '%s' "$1" ;; esac
+}
+
+# mm_fixer_count <root> — how many fixers are running. A fixer forks while it
+# works (a gate's subshell, mm_timeout's job and watchdog), and every fork
+# carries the fixer's command line, so counting pgrep matches would count one
+# fixer several times. Only processes whose parent is not itself a fixer are
+# counted.
+mm_fixer_count() {
+  local pids p pp n=0
+  pids=" $(pgrep -f "$1/fix-mr.sh" 2>/dev/null | tr '\n' ' ')"
+  for p in $pids; do
+    pp="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+    # no parent: the process exited after pgrep listed it — not a fixer
+    [ -n "$pp" ] || continue
+    case "$pids" in *" $pp "*) ;; *) n=$((n + 1)) ;; esac
+  done
+  printf '%s' "$n"
 }
 
 # Squeeze foreign text (git stderr, test output) into one safe log detail:
