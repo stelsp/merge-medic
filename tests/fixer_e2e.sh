@@ -55,6 +55,11 @@ case "$MM_FAKE" in
              printf '#!/bin/sh\n' > "$(git rev-parse --git-common-dir)/hooks/post-commit" ;;
   sneaky)    printf 'resolved\n' > conflict.txt; git add conflict.txt
              git -c alias.p='!env -u GIT_ALLOW_PROTOCOL git push -q origin HEAD:refs/heads/sneaky' p ;;
+  # a file the checkout left dirty: touched (same bytes) or really edited
+  touchy)    printf 'resolved\n' > conflict.txt; git add conflict.txt
+             touch crlf.txt ;;
+  crlfedit)  printf 'resolved\n' > conflict.txt; git add conflict.txt
+             printf 'edited\r\n' >> crlf.txt ;;
   link)      git checkout --ours -- docs/a-link.md; git add docs/a-link.md ;;
 esac
 EOF
@@ -62,12 +67,13 @@ export MM_FAKE_CALLED="$TMP/fake-called"
 
 REMOTE="$TMP/remote.git"
 # new_repo <kind>: a remote whose feat-1 conflicts with main, and a fresh
-# watch clone. kind: plain | protected | quoted | stamp | moddel | exec |
-# symlink
+# watch clone. kind: plain | protected | quoted | stamp | moddel | crlf |
+# exec | symlink
 new_repo() {
   rm -rf "$REMOTE" "$TMP/seed" "$TMP/watch" "$MM/state" "$MM/logs" "$MM/worktrees"
   git init -q --bare "$REMOTE"
   git init -q "$TMP/seed"
+  git -C "$TMP/seed" config core.safecrlf false
   (
     cd "$TMP/seed" || exit 1
     mkdir -p apps/auth/mobile docs
@@ -79,7 +85,14 @@ new_repo() {
     printf 'base\n' > kept.txt
     printf '#!/bin/sh\n# verified: 0000000\necho run\n' > run.sh; chmod +x run.sh
     ln -s old.md docs/a-link.md
+    printf 'one\r\ntwo\r\n' > crlf.txt
     git add -A; git commit -qm base
+    if [ "$1" = crlf ]; then
+      # committed with CRLF before the attribute that normalizes it existed:
+      # every fresh checkout of it is dirty
+      printf 'crlf.txt text eol=lf\n' > .gitattributes
+      git add .gitattributes; git commit -qm attributes
+    fi
     git branch feat-1
     case "$1" in
       plain)     printf 'main\n' > conflict.txt ;;
@@ -87,11 +100,13 @@ new_repo() {
       quoted)    printf 'main\n' > apps/auth/ключ.ts ;;
       stamp)     printf '# Doc\n> verified: bbbb222\nbody\n' > docs/arch.md ;;
       moddel)    git rm -q kept.txt ;;
+      crlf)      printf 'main\n' > conflict.txt ;;
       exec)      printf '#!/bin/sh\n# verified: bbbb222\necho run\n' > run.sh ;;
       symlink)   printf '# Doc\n> verified: bbbb222\nbody\n' > docs/arch.md
                  ln -sfn main.md docs/a-link.md ;;
     esac
-    git commit -qam "main side"
+    # (crlf.txt stays exactly as committed: staging it would normalize it)
+    git add -A -- . ':(exclude)crlf.txt'; git commit -qm "main side"
     git checkout -q feat-1
     case "$1" in
       plain)     printf 'feat\n' > conflict.txt ;;
@@ -100,11 +115,13 @@ new_repo() {
       stamp)     printf '# Doc\n> verified: aaaa111\nbody\n' > docs/arch.md ;;
       # (with a fixture in git's own markers: no rule may take it for a hunk)
       moddel)    printf 'feat changed it\n<<<<<<< HEAD\nsame\n=======\nsame\n>>>>>>> origin/main\n' > kept.txt ;;
+      crlf)      printf 'feat\n' > conflict.txt ;;
       exec)      printf '#!/bin/sh\n# verified: aaaa111\necho run\n' > run.sh ;;
       symlink)   printf '# Doc\n> verified: aaaa111\nbody\n' > docs/arch.md
                  ln -sfn arch.md docs/a-link.md ;;
     esac
-    git commit -qam "feat side"
+    # (crlf.txt stays exactly as committed: staging it would normalize it)
+    git add -A -- . ':(exclude)crlf.txt'; git commit -qm "feat side"
     git push -q "$REMOTE" main feat-1
   )
   git clone -q "$REMOTE" "$TMP/watch"
@@ -235,6 +252,15 @@ check "…and says why"                            "1" "$(contains "$LAST_EVENT"
 new_repo plain; write_config; MM_FAKE=hook run_fixer
 if [ -f "$MM/state/quarantined" ]; then q=1; else q=0; fi
 check "with hooks off, a new hook is not git state the bot relies on" "DONE/0" "$OUTCOME/$q"
+
+# ── what a fresh checkout already disagrees with ─────────────────────────────
+new_repo crlf; write_config; MM_FAKE=touchy run_fixer
+check "a file the checkout left dirty is not blamed on the resolver" "DONE/1" "$OUTCOME/$PUSHED"
+check "…nor slipped into the merge commit"       "" \
+  "$(git --git-dir "$REMOTE" diff --name-only feat-1^1 feat-1 -- crlf.txt)"
+new_repo crlf; write_config; MM_FAKE=crlfedit run_fixer
+check "…but a real edit to it is still caught"  "FAIL/0" "$OUTCOME/$PUSHED"
+check "…naming the file"                         "1" "$(contains "$LAST_EVENT" crlf.txt)"
 
 # ── the rules layer reads regular files only, and writes them back in place ──
 new_repo exec; write_config "RULES_KEEP_OURS='^> verified: |^# verified: '"; MM_FAKE=resolve run_fixer

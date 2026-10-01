@@ -383,6 +383,60 @@ marker_lines() {
     | sed -n 's/^.*:\([0-9][0-9]*\): leftover conflict marker$/\1/p' || true
 }
 
+# A fresh checkout is not always clean on its own: a file committed with CRLF
+# that .gitattributes now normalizes, or a filter this machine runs
+# differently, makes git stage something new for a path nobody edited. The
+# `git add -A` after the resolver then put that into the merge commit, and
+# the scope check blamed the resolver for it.
+#
+# untracked_snapshot: "hash<TAB>path" of the untracked, unignored files
+# there are before the resolver runs (a checkout normally leaves none)
+untracked_snapshot() {
+  local p
+  git -c core.quotePath=false ls-files --others --exclude-standard | while IFS= read -r p; do
+    [ -n "$p" ] && printf '%s\t%s\n' "$(raw_hash "$p")" "$p"
+  done
+  return 0
+}
+raw_hash() {
+  if [ -L "$1" ]; then printf 'link:%s' "$(readlink "$1")"
+  elif [ -f "$1" ]; then git hash-object --no-filters -- "$1"
+  else printf 'missing'; fi
+}
+# restore_untouched <index snapshot> <untracked before> <missing before>
+# <conflicts>: of the paths `git add -A` changed outside the conflict, put
+# back the ones the resolver did not touch. A tracked file is untouched when
+# its bytes and executable bit are still what a checkout of its old index
+# entry writes (git cat-file --filters applies the same attributes); a file
+# that was missing or untracked before is untouched when it still is
+# missing, or has the same bytes. Only what out_of_scope flags is looked at,
+# so a clean checkout costs nothing.
+restore_untouched() {
+  local p entry emode eblob h x
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    entry="$(P="$p" awk -F'\t' '$2 == ENVIRON["P"] { print $1; exit }' <<<"$1")"
+    if [ -n "$entry" ]; then
+      read -r emode eblob _ <<<"$entry"
+      if grep -qxF -- "$p" <<<"$3"; then
+        [ -e "$p" ] || [ -L "$p" ] || git update-index --cacheinfo "$emode,$eblob,$p"
+        continue
+      fi
+      { [ "$emode" = 100644 ] || [ "$emode" = 100755 ]; } && [ -f "$p" ] && [ ! -L "$p" ] || continue
+      if [ -x "$p" ]; then x=100755; else x=100644; fi
+      [ "$x" = "$emode" ] || continue
+      if git cat-file --filters --path="$p" "$eblob" 2>/dev/null | cmp -s - "$p"; then
+        git update-index --cacheinfo "$emode,$eblob,$p"
+      fi
+    else
+      h="$(P="$p" awk -F'\t' '$2 == ENVIRON["P"] { print $1; exit }' <<<"$2")"
+      if [ -n "$h" ] && [ "$(raw_hash "$p")" = "$h" ]; then
+        git rm -q --cached --ignore-unmatch -- ":(literal)$p" >/dev/null
+      fi
+    fi
+  done < <(out_of_scope "$1" "$4")
+}
+
 # regular_conflict <path>: both sides changed the path (git recorded ours
 # and theirs), every side it recorded is a regular file (mode 100644 or
 # 100755), and so is the working copy. Only then are there lines a rule
@@ -850,6 +904,8 @@ $(cat "$PLANFILE")"
   AILOG="$LOGDIR/ai-$IID-$(date '+%Y%m%d-%H%M%S').log"
   pre_head="$(git rev-parse HEAD)"
   pre_index="$(index_snapshot)"
+  pre_untracked="$(untracked_snapshot)"
+  pre_missing="$(git -c core.quotePath=false ls-files --deleted)"
   guard_start
   set +e
   mm_timeout "${RESOLVER_TIMEOUT:-900}" resolver_call resolve "You are resolving git merge conflicts in a worktree (branch $SRC, origin/$TGT merged in, ${SIGIL}$IID${TITLE:+ — \"$TITLE\"}).
@@ -927,6 +983,7 @@ $(cat "$ROOT/state/esc-$IID.md")
   # aider keeps its chat history and repo-map cache (.aider*) in the repo
   # root: resolver bookkeeping, never part of the resolution
   git add -A -- . ':(exclude).aider*'
+  restore_untouched "$pre_index" "$pre_untracked" "$pre_missing" "$conflicts"
   stray="$(out_of_scope "$pre_index" "$conflicts")"
   if [ -n "$stray" ]; then
     fail "resolver changed files outside the conflict — nothing pushed: $(printf '%s' "$stray" | tr '\n' ' ' | cut -c1-200)"
