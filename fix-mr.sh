@@ -20,7 +20,37 @@ IID="$1"; SRC="$2"; TGT="$3"; TITLE="${4:-}"; MODE="${5:-auto}"
 RESOLVER_TIMEOUT="$(mm_secs "${RESOLVER_TIMEOUT:-}" 900)"
 GATE_TIMEOUT="$(mm_secs "${GATE_TIMEOUT:-}" 1800)"
 NET_TIMEOUT="$(mm_secs "${NET_TIMEOUT:-}" 300)"
+GIT_TIMEOUT="$(mm_secs "${GIT_TIMEOUT:-}" 300)"
 SIGIL="$(mm_ref_sigil)"
+
+# ── git policy for everything this run starts ─────────────────────────────────
+# Hooks and commit signing run only when config.env asks for them. Either can
+# wait on something nobody is there to give — a hook running a test suite, a
+# signing agent that wants a passphrase or a touch — and inside the bot's own
+# checkout, merge, commit and push that wait used to have no end.
+# GIT_CONFIG_COUNT entries outrank every config file, the watch clone's own
+# included. Nothing may prompt for credentials either: a prompt would hang.
+git_policy() {
+  local n=0
+  if [ "${RUN_GIT_HOOKS:-0}" != "1" ]; then
+    export "GIT_CONFIG_KEY_$n=core.hooksPath" "GIT_CONFIG_VALUE_$n=/dev/null"
+    n=$((n + 1))
+  fi
+  if [ "${SIGN_BOT_COMMITS:-0}" != "1" ]; then
+    export "GIT_CONFIG_KEY_$n=commit.gpgSign" "GIT_CONFIG_VALUE_$n=false"
+    n=$((n + 1))
+  fi
+  export GIT_CONFIG_COUNT="$n" GIT_TERMINAL_PROMPT=0
+}
+git_policy_off() {
+  local i=0
+  while [ "$i" -lt "${GIT_CONFIG_COUNT:-0}" ]; do
+    unset "GIT_CONFIG_KEY_$i" "GIT_CONFIG_VALUE_$i"
+    i=$((i + 1))
+  done
+  unset GIT_CONFIG_COUNT
+}
+git_policy
 PROG="$ROOT/state/progress-$IID.log"
 LOGDIR="$ROOT/logs"; mkdir -p "$LOGDIR" "$ROOT/worktrees" "$ROOT/state"
 WT="$ROOT/worktrees/wt-$IID"
@@ -46,9 +76,11 @@ rc_text() {
   if [ "$1" = 124 ]; then printf 'timed out'; else printf 'exit %s' "$1"; fi
 }
 # gate_eval runs a gate command in its own subshell, so nothing it does to
-# the shell (cd, exit, variables) reaches the fixer.
+# the shell (cd, exit, variables) reaches the fixer. The bot's git policy
+# (git_policy) is for its own git steps: a gate sees git as configured, so a
+# test or an install step that sets up hooks behaves as it does anywhere.
 gate_eval() {
-  ( eval "$1" )
+  ( git_policy_off; eval "$1" )
 }
 # run_gate <PHASE> <command> — one event before, one after, with the outcome
 # token the dashboard colors by: "ok · 18s" / "red · exit 1 · <tail>".
@@ -501,8 +533,9 @@ fi
 
 ev WORKTREE "$WT"
 cleanup_wt
-git worktree add --force "$WT" -B "$SRC" "origin/$SRC" >/dev/null 2>&1 \
-  || fail "worktree add failed (branch held by another worktree?)"
+wrc=0
+mm_timeout "$GIT_TIMEOUT" git worktree add --force "$WT" -B "$SRC" "origin/$SRC" >/dev/null 2>&1 || wrc=$?
+[ "$wrc" = 0 ] || fail "worktree add failed ($(rc_text "$wrc"))"
 cd "$WT"
 rm -f "$ESCFILE" "$SUMFILE"
 
@@ -511,8 +544,11 @@ MERGE_BASE="$(git merge-base HEAD "origin/$TGT" 2>/dev/null || echo '')"
 ev MERGE "origin/$TGT"
 ai_ran=0
 summary=""
-if git -c merge.conflictStyle=zdiff3 merge --no-ff --no-edit \
-     -m "chore: merge origin/$TGT into $SRC (${SIGIL}$IID)" "origin/$TGT" >/dev/null 2>&1; then
+mrc=0
+mm_timeout "$GIT_TIMEOUT" git -c merge.conflictStyle=zdiff3 merge --no-ff --no-edit \
+  -m "chore: merge origin/$TGT into $SRC (${SIGIL}$IID)" "origin/$TGT" >/dev/null 2>&1 || mrc=$?
+[ "$mrc" = 124 ] && fail "merge of origin/$TGT timed out after ${GIT_TIMEOUT}s"
+if [ "$mrc" = 0 ]; then
   ev MERGE_CLEAN "no conflict markers — AI not needed (0 tokens)"
   resolve_mode="clean"
   if [ "$MODE" = "plan" ]; then
@@ -611,7 +647,9 @@ else
       # everything was mechanical: commit and go straight to the gates
       merge_msg="$(grep -v '^#' "$(git rev-parse --git-dir)/MERGE_MSG" 2>/dev/null | sed '/^$/d')"
       [ -n "$merge_msg" ] || merge_msg="chore: merge origin/$TGT into $SRC (${SIGIL}$IID)"
-      git commit -m "$merge_msg" -m "Merge-Medic-Run: $IID" >/dev/null
+      crc=0
+      mm_timeout "$GIT_TIMEOUT" git commit -m "$merge_msg" -m "Merge-Medic-Run: $IID" >/dev/null || crc=$?
+      [ "$crc" = 0 ] || fail "commit failed ($(rc_text "$crc"))"
       resolve_mode="rules"
       rules_only=1
     fi
@@ -824,7 +862,9 @@ $(cat "$ROOT/state/esc-$IID.md")
   # git prepared the merge message in MERGE_MSG; keep it and append.
   merge_msg="$(grep -v '^#' "$(git rev-parse --git-dir)/MERGE_MSG" 2>/dev/null | sed '/^$/d')"
   [ -n "$merge_msg" ] || merge_msg="chore: merge origin/$TGT into $SRC (${SIGIL}$IID)"
-  git commit -m "$merge_msg" -m "Merge-Medic-Run: $IID" >/dev/null
+  crc=0
+  mm_timeout "$GIT_TIMEOUT" git commit -m "$merge_msg" -m "Merge-Medic-Run: $IID" >/dev/null || crc=$?
+  [ "$crc" = 0 ] || fail "commit failed ($(rc_text "$crc"))"
   ai_ran=1
   resolve_mode="ai"
 fi
@@ -858,11 +898,17 @@ else
 fi
 
 # ── push: direct (into the source branch) or via a resolution MR/PR ───────────
+# A pre-push hook (RUN_GIT_HOOKS=1) runs inside the push, so it gets
+# GIT_TIMEOUT on top of NET_TIMEOUT.
 res_link=""
+push_secs="$NET_TIMEOUT"
+if [ "${RUN_GIT_HOOKS:-0}" = "1" ] && [ "$NET_TIMEOUT" != 0 ] && [ "$GIT_TIMEOUT" != 0 ]; then
+  push_secs=$((NET_TIMEOUT + GIT_TIMEOUT))
+fi
 if [ "${PUSH_MODE:-mr}" != "direct" ]; then
   FIXBR="merge-medic/fix-$IID-$(date +%s)"
   ev PUSH "mr · resolution branch $FIXBR (your branch stays untouched)"
-  mm_timeout "${NET_TIMEOUT:-300}" git push origin "HEAD:refs/heads/$FIXBR" >/dev/null 2>&1 \
+  mm_timeout "$push_secs" git push origin "HEAD:refs/heads/$FIXBR" >/dev/null 2>&1 \
     || { nrc=$?; fail "push of $FIXBR failed ($(rc_text "$nrc"))"; }
   res_title="merge-medic: resolve conflicts of ${SIGIL}$IID ($SRC <- $TGT)"
   res_body="Automated conflict resolution for ${SIGIL}$IID. Merge this into \`$SRC\` to clear the conflict — your branch is untouched until you do."
@@ -881,7 +927,7 @@ if [ "${PUSH_MODE:-mr}" != "direct" ]; then
   notify "${SIGIL}$IID resolved ✓" "review & merge: $res_link"
 else
   ev PUSH "direct · origin $SRC"
-  mm_timeout "${NET_TIMEOUT:-300}" git push origin "HEAD:$SRC" >/dev/null 2>&1 \
+  mm_timeout "$push_secs" git push origin "HEAD:$SRC" >/dev/null 2>&1 \
     || { nrc=$?; fail "push to $SRC failed ($(rc_text "$nrc")) — if $SRC moved ahead, the next tick retries"; }
 
   ev DONE "ok · merged origin/$TGT into $SRC, gates green, pushed $(git rev-parse --short HEAD)"

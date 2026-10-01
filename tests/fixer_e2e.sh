@@ -217,6 +217,35 @@ check "…and stays a symlink"                     "120000" \
 check "…while the file it points to is still decided by rules" "> verified: aaaa111" \
   "$(git --git-dir "$REMOTE" show feat-1:docs/arch.md | grep verified)"
 
+# ── hooks and signing are config's call ─────────────────────────────────────
+hooks_say_no() {
+  local h
+  for h in pre-commit pre-merge-commit commit-msg pre-push post-checkout; do
+    printf '#!/bin/sh\nexit 1\n' > "$TMP/watch/.git/hooks/$h"; chmod +x "$TMP/watch/.git/hooks/$h"
+  done
+}
+new_repo plain; hooks_say_no; write_config; MM_FAKE=resolve run_fixer
+check "the clone's hooks do not run by default"  "DONE/1" "$OUTCOME/$PUSHED"
+new_repo plain; hooks_say_no; write_config 'RUN_GIT_HOOKS=1'; MM_FAKE=resolve run_fixer
+check "…and do with RUN_GIT_HOOKS=1"             "FAIL/0" "$OUTCOME/$PUSHED"
+new_repo plain
+printf '#!/bin/sh\nsleep 47.11\n' > "$TMP/watch/.git/hooks/pre-commit"; chmod +x "$TMP/watch/.git/hooks/pre-commit"
+write_config 'RUN_GIT_HOOKS=1' 'GIT_TIMEOUT=2'; MM_FAKE=resolve run_fixer
+check "a hook that hangs is stopped at GIT_TIMEOUT" "FAIL/1" "$OUTCOME/$(( ELAPSED < 20 ? 1 : 0 ))"
+check "…reported as a timeout"                   "1" "$(contains "$LAST_EVENT" "timed out")"
+if pgrep -f 'sleep 47.11' >/dev/null 2>&1; then left=1; else left=0; fi
+check "…and leaves no process behind"            "0" "$left"
+pkill -f 'sleep 47.11' 2>/dev/null
+
+# a signer that cannot sign: the bot's commits are unsigned unless asked for
+signer_broken() { git config --global commit.gpgSign "$1"; git config --global gpg.program false; }
+new_repo plain; write_config; signer_broken true; MM_FAKE=resolve run_fixer; signer_broken false
+check "bot commits are not signed by default"    "DONE" "$OUTCOME"
+new_repo plain; write_config 'SIGN_BOT_COMMITS=1'; signer_broken true; MM_FAKE=resolve run_fixer
+signer_broken false
+check "…and are with SIGN_BOT_COMMITS=1"         "FAIL" "$OUTCOME"
+check "…where signing fails the commit"          "1" "$(contains "$LAST_EVENT" "commit failed")"
+
 if [ "$fails" != "0" ]; then
   echo "--- last fixer output:"; tail -20 "$TMP/fixer.out"
 fi
