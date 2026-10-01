@@ -222,8 +222,9 @@ consider() {
   local mode="plan"
   mm_src_is_auto "$src" && mode="auto"
   # an approve marker upgrades ANY mode to fix-approved — it also unblocks
-  # escalated auto-branch MRs after the human answered the bot's questions
-  if [ -f "$STATE/approve-$iid" ]; then
+  # escalated auto-branch MRs after the human answered the bot's questions.
+  # A quarantined instance launches nothing, so the approval waits for it.
+  if [ -f "$STATE/approve-$iid" ] && [ ! -f "$STATE/quarantined" ]; then
     mode="fix-approved"
     rm -f "$STATE/approve-$iid"
     logc FIX "$iid" "approval consumed · mode=fix-approved"; verbose=1
@@ -537,6 +538,19 @@ if [ "${DRY_RUN:-1}" = "1" ]; then
   exit 0
 fi
 
+# A fixer whose AI call changed git's own state quarantined the instance
+# (fix-mr.sh, guard_check): nothing is launched until a human has looked and
+# removed the file. The pairs stay unmarked, so the tick after that picks
+# them up as usual.
+if [ -f "$STATE/quarantined" ]; then
+  qkey="$(cksum < "$STATE/quarantined")"
+  if [ "$(cat "$STATE/notified-quarantine" 2>/dev/null || true)" != "$qkey" ]; then
+    logc ERROR "" "quarantined, fixing stopped: $(head -1 "$STATE/quarantined" | mm_clean) — check $WATCH_REPO, then remove state/quarantined"
+  fi
+  notify_once quarantine "$qkey" "merge-medic: fixing stopped" "an AI call changed git's own state — see state/quarantined"
+  exit 0
+fi
+
 # ── dedicated clone (created lazily, only when there is real work) ────────────
 if [ ! -d "$WATCH_REPO/.git" ]; then
   logc FIX "" "cloning $GIT_REMOTE_URL -> $WATCH_REPO (first run)"
@@ -569,6 +583,12 @@ launch_fixers() {
     if [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; then
       logc FIX "$iid" "waiting for a slot · $(running_fixers)/${PARALLEL_FIXERS:-1} fixers busy"
       while [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; do sleep 5; done
+    fi
+    # a fixer launched earlier in this tick may have quarantined the
+    # instance while this one waited: leave it and the rest unmarked
+    if [ -f "$STATE/quarantined" ]; then
+      logc ERROR "$iid" "quarantined while waiting for a slot — not launching the rest"
+      break
     fi
     mark_tried "$iid"
     nohup bash "$ROOT/fix-mr.sh" "$iid" "$src" "$tgt" "$title" "$mode" >> "$LOGDIR/fixer-$iid.log" 2>&1 &

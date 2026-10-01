@@ -193,6 +193,22 @@ check "…before its fixer started"             "marked" "$(cat "$LQ/started-1" 
 check "an MR still waiting for a slot is not" "0" "$(count_state 'tried-2')"
 rm -rf "$LQ"
 
+# a fixer of this tick that quarantines the instance stops the launches
+# behind it, which stay unmarked for after a human has looked
+new_state
+LQ="$(cd "$(mktemp -d)" && pwd -P)"
+# shellcheck disable=SC2016  # the fake fixer expands $1 itself, at run time
+printf ': > "%s/started-$1"; : > "%s/quarantined"\n' "$LQ" "$STATE" > "$LQ/fix-mr.sh"
+# shellcheck disable=SC2329,SC2317  # called from the extracted launch_fixers body
+running_fixers() { echo 0; }
+echo "conflict aaa:bbb feat-1 main none u x - one" > "$STATE/mr-1"
+echo "conflict ccc:ddd feat-2 main none u x - two" > "$STATE/mr-2"
+ROOT="$LQ" LOGDIR="$LQ" launch_fixers
+if [ -e "$LQ/started-2" ]; then st=1; else st=0; fi
+check "a quarantine during the tick stops the launches behind it" "0/0" "$st/$(count_state 'tried-2')"
+check "…and says so" "1" "$(grep -c 'quarantined while waiting for a slot' "$LQ/log")"
+rm -rf "$LQ"
+
 # ── watcher deadlines: a hung forge or git call ends the tick ───────────────
 # watch.sh itself, in an install of its own, with stand-ins for gh, glab and
 # git that answer at once, or hang on the call MM_HANG names
@@ -282,6 +298,24 @@ check "a hung fetch before launching ends the tick" "1/1/0" "$RC/$FAST/$LEFT"
 check "…saying it timed out"                   "1" "$(has "$LAST" "ERROR git fetch timed out after 2s")"
 if [ -e "$MM/logs/fixer-7.log" ]; then fx=1; else fx=0; fi
 check "…and launches no fixer"                 "0" "$fx"
+
+# a quarantined instance launches nothing, says so once, and keeps the
+# conflict unmarked for the tick after a human has cleared it
+echo
+echo "quarantine:"
+watch_config github 'DRY_RUN=0'; MM_PRS="[$(pr 7 CONFLICTING)]"; MM_HANG=none
+rm -rf "$MM/state" "$MM/logs" "$MM/.lock"; mkdir -p "$MM/state"
+printf '2026-10-01 12:00 #7: the resolver changed alias.x\n' > "$MM/state/quarantined"
+: > "$MM/state/approve-7"
+mm_timeout 20 bash "$MM/watch.sh" >/dev/null 2>&1; RC=$?
+mm_timeout 20 bash "$MM/watch.sh" >/dev/null 2>&1
+if [ -e "$MM/logs/fixer-7.log" ]; then fx=1; else fx=0; fi
+check "a quarantined instance launches no fixer" "0/0" "$RC/$fx"
+check "…says why, once"                        "1" "$(grep -c 'ERROR quarantined, fixing stopped' "$MM/logs/watch.log")"
+if [ -e "$MM/state/tried-7" ]; then tr=1; else tr=0; fi
+check "…and leaves the conflict to be fixed later" "0" "$tr"
+if [ -e "$MM/state/approve-7" ]; then ap=1; else ap=0; fi
+check "…with a pending approval kept for then" "1" "$ap"
 rm -rf "$WD"
 
 [ "$fails" = "0" ] && { echo "all good"; exit 0; }

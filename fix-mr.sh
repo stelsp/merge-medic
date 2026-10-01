@@ -397,6 +397,69 @@ regular_conflict() {
   [ -f "$1" ] && [ ! -L "$1" ]
 }
 
+# ── the resolver leaves git itself alone ──────────────────────────────────────
+# It may edit and stage files. Changing how git behaves is another matter: an
+# alias, a hooks path or a push URL in config, a hook, a branch or tag. All of
+# that is compared around every AI call, and a push by remote name from inside
+# it would show in the remote-tracking reflogs (one by URL leaves no trace:
+# the claude resolver cannot run either, and no resolver's git can reach a
+# remote unless the resolver itself removes GIT_ALLOW_PROTOCOL). A difference means something got past the
+# resolver's permissions, so this run stops and so does every later one
+# (state/quarantined) until a human has looked at the watch clone.
+# Remote-tracking refs and tags are not compared: the watcher's fetches
+# rewrite them while a resolver runs. The bot pushes by URL, which leaves no
+# reflog entry, so its own pushes never look like the resolver's.
+repo_state() {
+  local common wtc
+  common="$(git rev-parse --git-common-dir)"
+  printf '# config\n'
+  # Hooks count only when the bot runs them (RUN_GIT_HOOKS=1). Otherwise
+  # neither a hook nor a hooks path can reach it, and another fixer's gate
+  # may set them up at any moment (husky, lefthook, pre-commit install).
+  if [ "${RUN_GIT_HOOKS:-0}" = "1" ]; then
+    git config --local --list 2>/dev/null || true
+  else
+    git config --local --list 2>/dev/null | grep -vi '^core\.hookspath=' || true
+  fi
+  wtc="$(git rev-parse --git-path config.worktree)"
+  if [ -f "$wtc" ]; then printf '# config.worktree\n'; cat "$wtc"; fi
+  if [ "${RUN_GIT_HOOKS:-0}" = "1" ] && [ -d "$common/hooks" ]; then
+    printf '# hooks\n'
+    ( cd "$common/hooks" && find . -type f -exec cksum {} + 2>/dev/null | LC_ALL=C sort )
+  fi
+  printf '# refs\n'
+  git for-each-ref --format='%(objectname) %(refname)' | grep -v -e ' refs/remotes/' -e ' refs/tags/' || true
+}
+# pushes_since <epoch>: remote-tracking reflogs a push wrote to since then
+pushes_since() {
+  local logs
+  logs="$(git rev-parse --git-common-dir)/logs/refs/remotes"
+  [ -d "$logs" ] || return 0
+  ( cd "$logs" && find . -type f -exec awk -F'\t' -v t="$1" '
+      $2 == "update by push" { n = split($1, f, " "); if (f[n - 1] + 0 >= t + 0) print substr(FILENAME, 3) }' {} + ) \
+    2>/dev/null | sort -u || true
+}
+guard_start() {
+  MM_GUARD="$(repo_state)"
+  MM_GUARD_TS="$(date +%s)"
+}
+# guard_check <what ran>: quarantine when the repository changed under it.
+# Only names reach the message: a config value can hold a credential.
+guard_check() {
+  local now pushed what
+  now="$(repo_state)"
+  pushed="$(pushes_since "$MM_GUARD_TS")"
+  [ "$now" = "$MM_GUARD" ] && [ -z "$pushed" ] && return 0
+  what="$( { diff <(printf '%s\n' "$MM_GUARD") <(printf '%s\n' "$now") || true; } \
+    | sed -n 's/^[<>] //p' | sed -E 's/^([^= ]+)=.*/\1/; s/^[0-9a-f]{40,64} //; s/^[0-9]+ [0-9]+ //' \
+    | LC_ALL=C sort -u | awk 'NR <= 5' | tr '\n' ' ')"
+  [ -n "$pushed" ] && what="pushed to $(printf '%s' "$pushed" | tr '\n' ' ')$what"
+  printf '%s %s%s: %s\n' "$(date '+%Y-%m-%d %H:%M')" "$SIGIL" "$IID" "$1 changed ${what% }" \
+    > "$ROOT/state/quarantined"
+  git merge --abort 2>/dev/null || true
+  fail "$1 changed git's own state (${what% }) — all fixing stopped: check $WATCH_REPO, then remove state/quarantined"
+}
+
 # ── no silent deaths ──────────────────────────────────────────────────────────
 # fail, escalate, defer, a posted plan and a push are the ways a run is meant
 # to end, and each leaves a trace: ledger, event, notification. Anything else
@@ -435,6 +498,12 @@ trap 'on_exit $?' EXIT
 
 : > "$PROG"
 ev START "$SRC -> $TGT · mode=$MODE · $(printf '%s' "${TITLE:-}" | cut -c1-60)"
+
+# a resolver that changed git's own state stops every later run as well,
+# until a human has looked (see guard_check)
+if [ -f "$ROOT/state/quarantined" ]; then
+  fail "quarantined since $(cut -c1-120 "$ROOT/state/quarantined" | head -1) — check $WATCH_REPO, then remove state/quarantined"
+fi
 
 # ── push guard: non-AUTO branches are only ever pushed by an approved run ─────
 src_is_auto=0
@@ -533,8 +602,10 @@ fi
 
 ev WORKTREE "$WT"
 cleanup_wt
+# detached: no fixer moves a local branch, so local refs stay still while a
+# resolver runs and any change to them is the resolver's (guard_check)
 wrc=0
-mm_timeout "$GIT_TIMEOUT" git worktree add --force "$WT" -B "$SRC" "origin/$SRC" >/dev/null 2>&1 || wrc=$?
+mm_timeout "$GIT_TIMEOUT" git worktree add --force --detach "$WT" "origin/$SRC" >/dev/null 2>&1 || wrc=$?
 [ "$wrc" = 0 ] || fail "worktree add failed ($(rc_text "$wrc"))"
 cd "$WT"
 rm -f "$ESCFILE" "$SUMFILE"
@@ -717,6 +788,7 @@ else
   if [ "$MODE" = "plan" ]; then
     ev PLAN "$n file(s): $(printf '%s' "$conflicts" | tr '\n' ' ' | cut -c1-120)"
     PLANFILE="$ROOT/state/plan-$IID.md"
+    guard_start
     set +e
     mm_timeout "${RESOLVER_TIMEOUT:-900}" resolver_call plan "A merge of origin/$TGT into $SRC (${SIGIL}$IID${TITLE:+ — \"$TITLE\"}) has conflicts. You are in the worktree mid-merge with zdiff3 markers (||||||| shows the common ancestor). Do NOT edit anything — read the conflicted files and write a RESOLUTION PLAN as your answer.${tool_note:+ $tool_note}
 
@@ -733,6 +805,7 @@ Write GitHub-flavored markdown, no preamble: a '### <file path>' heading per fil
       "$LOGDIR/fixer-$IID.log" > "$PLANFILE"
     prc=$?
     set -e
+    guard_check "the plan agent"
     git merge --abort 2>/dev/null || true
     [ "$prc" != "0" ] && fail "plan agent failed ($(rc_text "$prc"))"
     [ -s "$PLANFILE" ] || fail "plan agent returned no text"
@@ -777,6 +850,7 @@ $(cat "$PLANFILE")"
   AILOG="$LOGDIR/ai-$IID-$(date '+%Y%m%d-%H%M%S').log"
   pre_head="$(git rev-parse HEAD)"
   pre_index="$(index_snapshot)"
+  guard_start
   set +e
   mm_timeout "${RESOLVER_TIMEOUT:-900}" resolver_call resolve "You are resolving git merge conflicts in a worktree (branch $SRC, origin/$TGT merged in, ${SIGIL}$IID${TITLE:+ — \"$TITLE\"}).
 
@@ -813,6 +887,7 @@ Rules:
     "$AILOG" > "$AILOG.ans"
   rc=$?
   set -e
+  guard_check "the resolver"
   # keep the human-readable resolver answer at the end of AILOG
   cat "$AILOG.ans" >> "$AILOG" 2>/dev/null || true
   rm -f "$AILOG.ans"
@@ -898,9 +973,12 @@ else
 fi
 
 # ── push: direct (into the source branch) or via a resolution MR/PR ───────────
-# A pre-push hook (RUN_GIT_HOOKS=1) runs inside the push, so it gets
-# GIT_TIMEOUT on top of NET_TIMEOUT.
+# By URL, not by remote name: no remote-tracking reflog entry, so a push in
+# guard_check's records is never the bot's own. No tags ride along, whatever
+# push.followTags says. A pre-push hook (RUN_GIT_HOOKS=1) runs inside the
+# push, so it gets GIT_TIMEOUT on top of NET_TIMEOUT.
 res_link=""
+push_url="$(git remote get-url --push origin)"
 push_secs="$NET_TIMEOUT"
 if [ "${RUN_GIT_HOOKS:-0}" = "1" ] && [ "$NET_TIMEOUT" != 0 ] && [ "$GIT_TIMEOUT" != 0 ]; then
   push_secs=$((NET_TIMEOUT + GIT_TIMEOUT))
@@ -908,7 +986,7 @@ fi
 if [ "${PUSH_MODE:-mr}" != "direct" ]; then
   FIXBR="merge-medic/fix-$IID-$(date +%s)"
   ev PUSH "mr · resolution branch $FIXBR (your branch stays untouched)"
-  mm_timeout "$push_secs" git push origin "HEAD:refs/heads/$FIXBR" >/dev/null 2>&1 \
+  mm_timeout "$push_secs" git push --no-follow-tags "$push_url" "HEAD:refs/heads/$FIXBR" >/dev/null 2>&1 \
     || { nrc=$?; fail "push of $FIXBR failed ($(rc_text "$nrc"))"; }
   res_title="merge-medic: resolve conflicts of ${SIGIL}$IID ($SRC <- $TGT)"
   res_body="Automated conflict resolution for ${SIGIL}$IID. Merge this into \`$SRC\` to clear the conflict — your branch is untouched until you do."
@@ -927,7 +1005,7 @@ if [ "${PUSH_MODE:-mr}" != "direct" ]; then
   notify "${SIGIL}$IID resolved ✓" "review & merge: $res_link"
 else
   ev PUSH "direct · origin $SRC"
-  mm_timeout "$push_secs" git push origin "HEAD:$SRC" >/dev/null 2>&1 \
+  mm_timeout "$push_secs" git push --no-follow-tags "$push_url" "HEAD:refs/heads/$SRC" >/dev/null 2>&1 \
     || { nrc=$?; fail "push to $SRC failed ($(rc_text "$nrc")) — if $SRC moved ahead, the next tick retries"; }
 
   ev DONE "ok · merged origin/$TGT into $SRC, gates green, pushed $(git rev-parse --short HEAD)"

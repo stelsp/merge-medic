@@ -46,6 +46,15 @@ case "$MM_FAKE" in
              git -C . push -q origin HEAD:refs/heads/pwn-dash-c
              git -c alias.p='!git push -q origin HEAD:refs/heads/pwn-alias' p
              printf 'resolved\n' > conflict.txt; git add conflict.txt ;;
+  # what a resolver must never change about git itself
+  configure) printf 'resolved\n' > conflict.txt; git add conflict.txt
+             git config alias.x '!true' ;;
+  branch)    printf 'resolved\n' > conflict.txt; git add conflict.txt
+             git update-ref refs/heads/evil HEAD ;;
+  hook)      printf 'resolved\n' > conflict.txt; git add conflict.txt
+             printf '#!/bin/sh\n' > "$(git rev-parse --git-common-dir)/hooks/post-commit" ;;
+  sneaky)    printf 'resolved\n' > conflict.txt; git add conflict.txt
+             git -c alias.p='!env -u GIT_ALLOW_PROTOCOL git push -q origin HEAD:refs/heads/sneaky' p ;;
   link)      git checkout --ours -- docs/a-link.md; git add docs/a-link.md ;;
 esac
 EOF
@@ -116,6 +125,7 @@ write_config() {
 
 # run_fixer: one full fixer run for MR 1 (feat-1 -> main)
 run_fixer() {
+  rm -f "$MM_FAKE_CALLED"
   before_tip="$(git --git-dir "$REMOTE" rev-parse feat-1)"
   SECONDS=0
   bash "$MM/fix-mr.sh" 1 feat-1 main "e2e" auto > "$TMP/fixer.out" 2>&1
@@ -204,6 +214,27 @@ new_repo plain; write_config; MM_FAKE=pushy run_fixer
 check "pushes from inside the resolver go nowhere" "" \
   "$(git --git-dir "$REMOTE" for-each-ref --format='%(refname)' refs/heads/pwn-plain refs/heads/pwn-dash-c refs/heads/pwn-alias)"
 check "…and the run itself still lands"          "DONE" "$OUTCOME"
+
+# a change to git's own state stops this run and every later one: config,
+# a local ref, a hook, and a push that got out by dropping the guard
+for mode in configure branch hook sneaky; do
+  new_repo plain
+  # (a hook is only the bot's business when it runs hooks at all)
+  if [ "$mode" = hook ]; then write_config 'RUN_GIT_HOOKS=1'; else write_config; fi
+  MM_FAKE=$mode run_fixer
+  check "$mode: the run fails, nothing pushed"   "FAIL/0" "$OUTCOME/$PUSHED"
+  if [ -f "$MM/state/quarantined" ]; then q=1; else q=0; fi
+  check "$mode: …and fixing is quarantined"      "1" "$q"
+done
+check "the push that got out is named"           "1" "$(contains "$LAST_EVENT" "pushed to")"
+MM_FAKE=resolve run_fixer
+check "a quarantined instance calls no resolver" "FAIL/0" "$OUTCOME/$CALLED"
+check "…and says why"                            "1" "$(contains "$LAST_EVENT" quarantined)"
+# with hooks off a hook is inert: one appearing mid-run (another fixer's gate
+# installing them, say) does not stop all fixing
+new_repo plain; write_config; MM_FAKE=hook run_fixer
+if [ -f "$MM/state/quarantined" ]; then q=1; else q=0; fi
+check "with hooks off, a new hook is not git state the bot relies on" "DONE/0" "$OUTCOME/$q"
 
 # ── the rules layer reads regular files only, and writes them back in place ──
 new_repo exec; write_config "RULES_KEEP_OURS='^> verified: |^# verified: '"; MM_FAKE=resolve run_fixer
