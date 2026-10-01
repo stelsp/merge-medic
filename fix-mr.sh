@@ -308,6 +308,20 @@ marker_lines() {
     | sed -n 's/^.*:\([0-9][0-9]*\): leftover conflict marker$/\1/p' || true
 }
 
+# regular_conflict <path>: both sides changed the path (git recorded ours
+# and theirs), every side it recorded is a regular file (mode 100644 or
+# 100755), and so is the working copy. Only then are there lines a rule
+# could decide: a symlink's content is its target, and reading through it
+# would rewrite the file it points to; and the kept side of a modify/delete
+# carries no markers of git's at all, so marker-shaped text in it (a test
+# fixture, a docs example) would be taken for a hunk.
+regular_conflict() {
+  git ls-files -u -- ":(literal)$1" | awk '
+    { if ($1 != "100644" && $1 != "100755") bad = 1; side[$3] = 1 }
+    END { exit (NR == 0 || bad || !side[2] || !side[3]) }' || return 1
+  [ -f "$1" ] && [ ! -L "$1" ]
+}
+
 # ── no silent deaths ──────────────────────────────────────────────────────────
 # fail, escalate, defer, a posted plan and a push are the ways a run is meant
 # to end, and each leaves a trace: ledger, event, notification. Anything else
@@ -318,10 +332,12 @@ marker_lines() {
 MM_LEDGER=""        # set by ledger(): the run recorded how it ended
 MM_ERR_CMD=""
 MM_HOLD_BUDGET=0    # 1 while this run holds the budget lock
+MM_TMP="$(mktemp -d "${TMPDIR:-/tmp}/merge-medic.XXXXXX")"
 on_exit() {
   local rc="$1" kids
   set +e
   [ "$MM_HOLD_BUDGET" = 1 ] && rmdir "$ROOT/state/.budget.lock" 2>/dev/null
+  rm -rf "$MM_TMP"
   [ "$rc" = 0 ] && return 0
   # a TERM or a crash can land mid-step: stop whatever that step started
   # (a resolver still editing, a test run) before its worktree goes away
@@ -505,30 +521,45 @@ else
   # tokens, no budget slot and no waiting, and shrinks what the model is
   # shown when something real is left behind.
   rules_only=0
+  rules_on=0
   if [ -n "${RULES_KEEP_OURS:-}" ]; then
-    rules_left=""; rules_done=0; rc=0
+    # rules.awk refuses a pattern it cannot use (one that matches every line,
+    # or one that does not parse): say so once, not once per file
+    rrc=0
+    awk -v keep_ours="$RULES_KEEP_OURS" -v ours_label=HEAD -v theirs_label="origin/$TGT" \
+      -f "$ROOT/rules.awk" /dev/null >/dev/null 2>&1 || rrc=$?
+    if [ "$rrc" = 3 ]; then
+      rules_on=1
+    else
+      ev RULES "WARN · RULES_KEEP_OURS matches every line or does not parse — rules layer off"
+    fi
+  fi
+  if [ "$rules_on" = 1 ]; then
+    rules_left=""; rules_done=0
     while IFS= read -r f; do
       [ -n "$f" ] || continue
-      # a conflicted path with no file behind it (the deleted side of a
-      # modify/delete) has no lines to decide
-      if [ ! -f "$f" ]; then
+      # a modify/delete, a symlink or a submodule has no lines a rule could
+      # decide: they go to the resolver exactly as git left them
+      if ! regular_conflict "$f"; then
         rules_left="$rules_left$f
 "
         continue
       fi
-      awk -v keep_ours="${RULES_KEEP_OURS}" -f "$ROOT/rules.awk" "$f" > "$f.mm-rules" 2>/dev/null || rc=$?
+      rc=0
+      awk -v keep_ours="$RULES_KEEP_OURS" -v ours_label=HEAD -v theirs_label="origin/$TGT" \
+        -f "$ROOT/rules.awk" "$f" > "$MM_TMP/rules-out" 2>/dev/null || rc=$?
+      # written back in place: a new file moved over it would lose the
+      # executable bit
       case "$rc" in
-        0) mv "$f.mm-rules" "$f"; git add -- "$f"; rules_done=$((rules_done + 1)) ;;
-        1) mv "$f.mm-rules" "$f"                       # partly decided: fewer hunks for the model
+        0) cat "$MM_TMP/rules-out" > "$f"; git add -- "$f"; rules_done=$((rules_done + 1)) ;;
+        1) cat "$MM_TMP/rules-out" > "$f"                # partly decided: fewer hunks for the model
            rules_left="$rules_left$f
 " ;;
-        # unparsable, or no hunks at all (modify/delete, binary): leave the
-        # file exactly as git left it
-        *) rm -f "$f.mm-rules"
-           rules_left="$rules_left$f
+        # unparsable, or no hunks at all (binary): leave the file exactly as
+        # git left it
+        *) rules_left="$rules_left$f
 " ;;
       esac
-      rc=0
     done <<<"$conflicts"
     [ "$rules_done" -gt 0 ] && ev RULES "ok · $rules_done of $n file(s) decided by rules, no model"
     conflicts="$(printf '%s' "$rules_left" | sed '/^$/d')"

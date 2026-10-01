@@ -41,13 +41,15 @@ case "$MM_FAKE" in
   crash)     printf 'resolved\n' > conflict.txt; git add conflict.txt
              : > "$(git rev-parse --git-dir)/index.lock" ;;   # the fixer's own git add dies
   keepfile)  git add kept.txt ;;
+  link)      git checkout --ours -- docs/a-link.md; git add docs/a-link.md ;;
 esac
 EOF
 export MM_FAKE_CALLED="$TMP/fake-called"
 
 REMOTE="$TMP/remote.git"
 # new_repo <kind>: a remote whose feat-1 conflicts with main, and a fresh
-# watch clone. kind: plain | protected | quoted | stamp | moddel
+# watch clone. kind: plain | protected | quoted | stamp | moddel | exec |
+# symlink
 new_repo() {
   rm -rf "$REMOTE" "$TMP/seed" "$TMP/watch" "$MM/state" "$MM/logs" "$MM/worktrees"
   git init -q --bare "$REMOTE"
@@ -61,6 +63,8 @@ new_repo() {
     printf 'base\n' > apps/auth/ключ.ts
     printf '# Doc\n> verified: 0000000\nbody\n' > docs/arch.md
     printf 'base\n' > kept.txt
+    printf '#!/bin/sh\n# verified: 0000000\necho run\n' > run.sh; chmod +x run.sh
+    ln -s old.md docs/a-link.md
     git add -A; git commit -qm base
     git branch feat-1
     case "$1" in
@@ -69,6 +73,9 @@ new_repo() {
       quoted)    printf 'main\n' > apps/auth/ключ.ts ;;
       stamp)     printf '# Doc\n> verified: bbbb222\nbody\n' > docs/arch.md ;;
       moddel)    git rm -q kept.txt ;;
+      exec)      printf '#!/bin/sh\n# verified: bbbb222\necho run\n' > run.sh ;;
+      symlink)   printf '# Doc\n> verified: bbbb222\nbody\n' > docs/arch.md
+                 ln -sfn main.md docs/a-link.md ;;
     esac
     git commit -qam "main side"
     git checkout -q feat-1
@@ -77,7 +84,11 @@ new_repo() {
       protected) printf 'feat\n' > apps/auth/mobile/qr.ts ;;
       quoted)    printf 'feat\n' > apps/auth/ключ.ts ;;
       stamp)     printf '# Doc\n> verified: aaaa111\nbody\n' > docs/arch.md ;;
-      moddel)    printf 'feat changed it\n' > kept.txt ;;
+      # (with a fixture in git's own markers: no rule may take it for a hunk)
+      moddel)    printf 'feat changed it\n<<<<<<< HEAD\nsame\n=======\nsame\n>>>>>>> origin/main\n' > kept.txt ;;
+      exec)      printf '#!/bin/sh\n# verified: aaaa111\necho run\n' > run.sh ;;
+      symlink)   printf '# Doc\n> verified: aaaa111\nbody\n' > docs/arch.md
+                 ln -sfn arch.md docs/a-link.md ;;
     esac
     git commit -qam "feat side"
     git push -q "$REMOTE" main feat-1
@@ -179,6 +190,20 @@ check "a stamp-only conflict is decided by rules" "DONE/rules/0" "$OUTCOME/$MODE
 # …but a modify/delete conflict has no markers and is not its to decide
 new_repo moddel; write_config "RULES_KEEP_OURS='^> verified: '"; MM_FAKE=keepfile run_fixer
 check "a modify/delete conflict goes to the resolver" "DONE/ai/1" "$OUTCOME/$MODE_USED/$CALLED"
+check "…with the marker-shaped fixture in it intact" "1" \
+  "$(git --git-dir "$REMOTE" show feat-1:kept.txt | grep -c '^<<<<<<< HEAD$')"
+
+# ── the rules layer reads regular files only, and writes them back in place ──
+new_repo exec; write_config "RULES_KEEP_OURS='^> verified: |^# verified: '"; MM_FAKE=resolve run_fixer
+check "a stamp conflict in a script is decided by rules" "DONE/rules" "$OUTCOME/$MODE_USED"
+check "…and the script stays executable"         "100755" \
+  "$(git --git-dir "$REMOTE" ls-tree feat-1 run.sh | cut -d' ' -f1)"
+new_repo symlink; write_config "RULES_KEEP_OURS='^> verified: '"; MM_FAKE="link" run_fixer
+check "a conflicted symlink goes to the resolver" "DONE/ai/1" "$OUTCOME/$MODE_USED/$CALLED"
+check "…and stays a symlink"                     "120000" \
+  "$(git --git-dir "$REMOTE" ls-tree feat-1 docs/a-link.md | cut -d' ' -f1)"
+check "…while the file it points to is still decided by rules" "> verified: aaaa111" \
+  "$(git --git-dir "$REMOTE" show feat-1:docs/arch.md | grep verified)"
 
 if [ "$fails" != "0" ]; then
   echo "--- last fixer output:"; tail -20 "$TMP/fixer.out"
