@@ -552,29 +552,32 @@ mm_timeout "$NET_TIMEOUT" git -C "$WATCH_REPO" fetch --prune --quiet origin >>"$
   notify_once forge "fetch" "merge-medic: git fetch failed" "the watcher cannot reach the remote"
   exit 1; }
 
-# ── mark pairs as tried BEFORE launching (no retry loops on crashes) ──────────
-while IFS=$'\t' read -r iid _ _ _; do
-  [ -z "$iid" ] && continue
-  mark_tried "$iid"
-done <<<"$targets"
-
 # ── launch fixers (fix-mr.sh, one per MR; cap PARALLEL_FIXERS) ────────────────
 # Each fixer decides on its own whether AI is needed (only on real conflict
 # markers), accounts the AI budget, and writes phases to
 # state/progress-<iid>.log for `mrwatch top`.
 running_fixers() { mm_fixer_count "$ROOT"; }
 
+# launch_fixers marks each pair tried right before its own fixer starts (no
+# retry loops on crashes), never earlier: a tick killed while it waits for a
+# slot must leave the MRs it never reached unmarked, or no fixer ever runs for
+# them — a marked pair stays deduped until somebody pushes.
+launch_fixers() {
+  local iid src tgt mode title launched=0
+  while IFS=$'\t' read -r iid src tgt mode title; do
+    [ -z "$iid" ] && continue
+    if [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; then
+      logc FIX "$iid" "waiting for a slot · $(running_fixers)/${PARALLEL_FIXERS:-1} fixers busy"
+      while [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; do sleep 5; done
+    fi
+    mark_tried "$iid"
+    nohup bash "$ROOT/fix-mr.sh" "$iid" "$src" "$tgt" "$title" "$mode" >> "$LOGDIR/fixer-$iid.log" 2>&1 &
+    logc FIX "$iid" "fixer started · $src -> $tgt [$mode] pid=$! log: fixer-$iid.log"
+    launched=$((launched + 1))
+    sleep 1
+  done <<<"$targets"
+  logc FIX "" "$launched fixer(s) launched (cap ${PARALLEL_FIXERS:-1}) — results arrive as notifications"
+}
+
 notify "Conflicts: $count MR(s)" "Launching fixers (mrwatch top for progress)"
-launched=0
-while IFS=$'\t' read -r iid src tgt mode title; do
-  [ -z "$iid" ] && continue
-  if [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; then
-    logc FIX "$iid" "waiting for a slot · $(running_fixers)/${PARALLEL_FIXERS:-1} fixers busy"
-    while [ "$(running_fixers)" -ge "${PARALLEL_FIXERS:-1}" ]; do sleep 5; done
-  fi
-  nohup bash "$ROOT/fix-mr.sh" "$iid" "$src" "$tgt" "$title" "$mode" >> "$LOGDIR/fixer-$iid.log" 2>&1 &
-  logc FIX "$iid" "fixer started · $src -> $tgt [$mode] pid=$! log: fixer-$iid.log"
-  launched=$((launched + 1))
-  sleep 1
-done <<<"$targets"
-logc FIX "" "$launched fixer(s) launched (cap ${PARALLEL_FIXERS:-1}) — results arrive as notifications"
+launch_fixers

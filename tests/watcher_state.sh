@@ -163,6 +163,36 @@ git -C "$wt" commit -q -m "feat: an agent's own commit"
 if git -C "$wt" log -1 --format='%B' | grep -q '^Merge-Medic-Run: '; then ours=1; else ours=0; fi
 check "an agent's commit does not"        "0" "$ours"
 
+# ── launch queue: a tick killed while it waits for a slot keeps its queue ───
+eval "$(sed -n '/^mark_tried() /p' "$ROOT/watch.sh")"
+eval "$(sed -n '/^launch_fixers() {/,/^}/p' "$ROOT/watch.sh")"
+
+echo
+echo "launch queue:"
+new_state; MARK=tried; PARALLEL_FIXERS=1
+LQ="$(cd "$(mktemp -d)" && pwd -P)"
+# the stand-in fixer notes whether its pair was marked by the time it started
+# shellcheck disable=SC2016  # the fake fixer expands $1 itself, at run time
+printf 'if [ -e "%s/tried-$1" ]; then echo marked; else echo unmarked; fi > "%s/started-$1"\n' \
+  "$STATE" "$LQ" > "$LQ/fix-mr.sh"
+# one free slot for the first launch, busy for good after that
+# shellcheck disable=SC2329,SC2317  # called from the extracted launch_fixers body
+running_fixers() { if [ -e "$LQ/slot-taken" ]; then echo 1; else : > "$LQ/slot-taken"; echo 0; fi; }
+# shellcheck disable=SC2329,SC2317
+logc() { printf '%s\n' "$*" >> "$LQ/log"; }
+echo "conflict aaa:bbb feat-1 main none u x - one" > "$STATE/mr-1"
+echo "conflict ccc:ddd feat-2 main none u x - two" > "$STATE/mr-2"
+targets="$(printf '1\tfeat-1\tmain\tauto\tone\n2\tfeat-2\tmain\tauto\ttwo')"
+ROOT="$LQ" LOGDIR="$LQ" launch_fixers &
+launcher=$!
+n=0
+while ! grep -q 'waiting for a slot' "$LQ/log" 2>/dev/null && [ "$n" -lt 50 ]; do sleep 0.2; n=$((n + 1)); done
+mm_kill_tree "$launcher" TERM; wait "$launcher" 2>/dev/null
+check "the launched MR is marked tried"       "aaa:bbb" "$(cat "$STATE/tried-1" 2>/dev/null)"
+check "…before its fixer started"             "marked" "$(cat "$LQ/started-1" 2>/dev/null)"
+check "an MR still waiting for a slot is not" "0" "$(count_state 'tried-2')"
+rm -rf "$LQ"
+
 # ── watcher deadlines: a hung forge or git call ends the tick ───────────────
 # watch.sh itself, in an install of its own, with stand-ins for gh, glab and
 # git that answer at once, or hang on the call MM_HANG names
