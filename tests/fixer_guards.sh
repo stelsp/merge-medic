@@ -209,12 +209,15 @@ pkill -f '^sleep 2.4713' 2>/dev/null; pkill -f '^sleep 4713' 2>/dev/null
 # ── resolution MRs: one per MR, and never treated as work ───────────────────
 echo
 echo "resolution MRs:"
+eval "$(sed -n '/^bot_login() {/,/^}/p' "$ROOT/fix-mr.sh")"
 eval "$(sed -n '/^open_resolution_mr() {/,/^}/p' "$ROOT/fix-mr.sh")"
-# stand-ins for the forge CLIs: print what the test sets, exit how it says
+# stand-ins for the forge CLIs: print what the test sets, exit how it says;
+# "api user" asks who the bot is
 mkdir -p "$TMP/bin"
 for cli in gh glab; do
   # shellcheck disable=SC2016  # the stub expands these itself, at run time
-  printf '#!/bin/sh\nprintf "%%s" "$FORGE_OUT"\nexit "${FORGE_RC:-0}"\n' > "$TMP/bin/$cli"
+  printf '#!/bin/sh\ncase "$*" in "api user"*) printf "%%s" "$FORGE_USER"; exit "${FORGE_USER_RC:-0}" ;; esac\nprintf "%%s" "$FORGE_OUT"\nexit "${FORGE_RC:-0}"\n' \
+    > "$TMP/bin/$cli"
   chmod +x "$TMP/bin/$cli"
 done
 PATH="$TMP/bin:$PATH"
@@ -222,25 +225,42 @@ PATH="$TMP/bin:$PATH"
 { IID=7; SRC=feat-7; PROJECT_PATH=group/repo; }
 
 PROVIDER=github
-export FORGE_RC=0
-export FORGE_OUT='[{"headRefName":"merge-medic/fix-70-1700000000","url":"https://x/pull/2"},
-  {"headRefName":"merge-medic/fix-7-1700000000","url":"https://x/pull/3"}]'
+export FORGE_RC=0 FORGE_USER=mm-bot
+export FORGE_OUT='[{"headRefName":"merge-medic/fix-70-1700000000","url":"https://x/pull/2","author":{"login":"mm-bot"},"isCrossRepository":false},
+  {"headRefName":"merge-medic/fix-7-1700000000","url":"https://x/pull/3","author":{"login":"mm-bot"},"isCrossRepository":false}]'
 check "github: finds this MR's open resolution" "https://x/pull/3" "$(open_resolution_mr)"
-export FORGE_OUT='[{"headRefName":"merge-medic/fix-70-1700000000","url":"https://x/pull/2"}]'
+export FORGE_OUT='[{"headRefName":"merge-medic/fix-70-1700000000","url":"https://x/pull/2","author":{"login":"mm-bot"},"isCrossRepository":false}]'
 out="$(open_resolution_mr)"; rc=$?
 check "github: another MR's resolution is not ours" "/0" "$out/$rc"
+export FORGE_OUT='[{"headRefName":"merge-medic/fix-7-1700000000","url":"https://x/pull/4","author":{"login":"someone"},"isCrossRepository":false}]'
+out="$(open_resolution_mr)"; rc=$?
+check "github: a look-alike branch somebody else opened is not ours" "/0" "$out/$rc"
+export FORGE_OUT='[{"headRefName":"merge-medic/fix-7-1700000000","url":"https://x/pull/5","author":{"login":"mm-bot"},"isCrossRepository":true}]'
+out="$(open_resolution_mr)"; rc=$?
+check "github: one from a fork is not ours" "/0" "$out/$rc"
 export FORGE_OUT='' FORGE_RC=1
 if open_resolution_mr >/dev/null; then rc=0; else rc=1; fi
 check "github: a failed lookup is reported, not read as none" "1" "$rc"
+export FORGE_RC=0 FORGE_USER_RC=1
+if open_resolution_mr >/dev/null; then rc=0; else rc=1; fi
+check "github: not knowing who the bot is fails the lookup" "1" "$rc"
+unset FORGE_USER_RC
 
+# shellcheck disable=SC2034  # read by the extracted open_resolution_mr body
 PROVIDER=gitlab
-export FORGE_RC=0
-export FORGE_OUT='[{"source_branch":"merge-medic/fix-7-1700000000","web_url":"https://x/-/merge_requests/9"}]'
+export FORGE_RC=0 FORGE_USER='{"username":"mm-bot"}'
+export FORGE_OUT='[{"source_branch":"merge-medic/fix-7-1700000000","web_url":"https://x/-/merge_requests/9","author":{"username":"mm-bot"},"source_project_id":1,"target_project_id":1}]'
 check "gitlab: finds this MR's open resolution" "https://x/-/merge_requests/9" "$(open_resolution_mr)"
+export FORGE_OUT='[{"source_branch":"merge-medic/fix-7-1700000000","web_url":"https://x/-/merge_requests/10","author":{"username":"someone"},"source_project_id":1,"target_project_id":1}]'
+out="$(open_resolution_mr)"; rc=$?
+check "gitlab: a look-alike branch somebody else opened is not ours" "/0" "$out/$rc"
+export FORGE_OUT='[{"source_branch":"merge-medic/fix-7-1700000000","web_url":"https://x/-/merge_requests/11","author":{"username":"mm-bot"},"source_project_id":2,"target_project_id":1}]'
+out="$(open_resolution_mr)"; rc=$?
+check "gitlab: one from a fork is not ours" "/0" "$out/$rc"
 export FORGE_OUT='{"message":"401 Unauthorized"}'
 if open_resolution_mr >/dev/null; then rc=0; else rc=1; fi
 check "gitlab: an error answer is a failed lookup" "1" "$rc"
-unset FORGE_OUT FORGE_RC
+unset FORGE_OUT FORGE_RC FORGE_USER
 
 # the watcher: an MR whose source is our own resolution branch is not work
 eval "$(sed -n '/^consider() {/,/^}/p' "$ROOT/watch.sh")"

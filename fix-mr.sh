@@ -322,21 +322,39 @@ collect_feedback() { # $1 = plan file; its mtime is the cutoff
   fi
 }
 
+# bot_login: the forge user this instance acts as, the author of every
+# resolution MR/PR it opens. Fails when the forge does not answer.
+bot_login() {
+  if mm_is_github; then
+    mm_timeout "${NET_TIMEOUT:-300}" gh api user --jq .login 2>/dev/null
+  else
+    mm_timeout "${NET_TIMEOUT:-300}" env GITLAB_HOST="${GITLAB_HOST:-}" glab api user 2>/dev/null \
+      | jq -er '.username'
+  fi
+}
+
 # open_resolution_mr: URL of a resolution MR/PR this bot opened earlier for
 # this MR that nobody has merged or closed yet (source merge-medic/fix-<iid>-*,
 # target $SRC). Prints nothing when there is none; fails when the forge could
-# not be asked.
+# not be asked. Only an MR the bot itself opened, from a branch in this same
+# repository, counts: anybody can name a branch merge-medic/fix-<iid>-…, a
+# fork's included, and such an MR would hold the fixer back for good.
 open_resolution_mr() {
-  local prefix="merge-medic/fix-$IID-" enc
+  local prefix="merge-medic/fix-$IID-" enc me
+  me="$(bot_login)" || return 1
+  [ -n "$me" ] || return 1
   if mm_is_github; then
     mm_timeout "${NET_TIMEOUT:-300}" gh pr list --repo "$PROJECT_PATH" --state open \
-        --base "$SRC" --limit 100 --json headRefName,url 2>/dev/null \
-      | jq -er --arg p "$prefix" '[.[] | select(.headRefName | startswith($p)) | .url][0] // ""' 2>/dev/null
+        --base "$SRC" --limit 100 --json headRefName,url,author,isCrossRepository 2>/dev/null \
+      | jq -er --arg p "$prefix" --arg me "$me" '[.[] | select(.headRefName | startswith($p))
+          | select(.author.login == $me) | select(.isCrossRepository | not) | .url][0] // ""' 2>/dev/null
   else
     enc="$(jq -rn --arg s "$SRC" '$s | @uri')"
     mm_timeout "${NET_TIMEOUT:-300}" env GITLAB_HOST="${GITLAB_HOST:-}" glab api \
         "projects/${PROJECT_PATH//\//%2F}/merge_requests?state=opened&target_branch=$enc&per_page=100" 2>/dev/null \
-      | jq -er --arg p "$prefix" '[.[] | select(.source_branch | startswith($p)) | .web_url][0] // ""' 2>/dev/null
+      | jq -er --arg p "$prefix" --arg me "$me" '[.[] | select(.source_branch | startswith($p))
+          | select(.author.username == $me) | select(.source_project_id == .target_project_id)
+          | .web_url][0] // ""' 2>/dev/null
   fi
 }
 
